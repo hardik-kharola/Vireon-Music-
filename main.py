@@ -88,6 +88,23 @@ bot = commands.Bot(
 # YOUTUBE / FFMPEG
 # ============================================================
 
+YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "").strip()
+
+COOKIE_FILE = "/tmp/youtube_cookies.txt"
+
+if YOUTUBE_COOKIES:
+    try:
+        with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+            f.write(YOUTUBE_COOKIES)
+
+        logging.info("[OK] YouTube cookies loaded.")
+
+    except Exception as exc:
+        logging.error(
+            "[ERROR] Could not create YouTube cookie file: %s",
+            exc
+        )
+
 YDL_OPTIONS = {
     "format": "bestaudio/best",
     "noplaylist": True,
@@ -96,6 +113,15 @@ YDL_OPTIONS = {
     "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
     "extract_flat": False,
+
+    # YouTube authentication cookies
+    **(
+        {
+            "cookiefile": COOKIE_FILE
+        }
+        if os.path.exists(COOKIE_FILE)
+        else {}
+    ),
 
     "js_runtimes": {
         "node": {}
