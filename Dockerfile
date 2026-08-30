@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM node:26-bookworm-slim
 
 ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
