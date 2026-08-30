@@ -1,0 +1,8 @@
+Vireon token setup
+
+1. Create/reset your Discord bot token in the Discord Developer Portal.
+2. Copy .env.example to .env.
+3. Put your new token after DISCORD_TOKEN=.
+4. Optional: put your own Discord user ID after VIREON_OWNER_ID= for owner/developer-only commands.
+5. Never share the token in chat, screenshots, Git, or public archives.
+6. Start with: python main.py

@@ -1,0 +1,7 @@
+.env
+dist/.env
+.venv/
+__pycache__/
+*.log
+bot.db
+command_logs.txt

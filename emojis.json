@@ -1,0 +1,7 @@
+{
+    "success": "✅",
+    "tick": "✅",
+    "error": "❌",
+    "cross": "❌",
+    "failed": "❌"
+}

@@ -1,0 +1,7 @@
+discord.py
+python-dotenv
+aiosqlite==0.19.0
+cryptography
+wavelink
+davey
+Pillow

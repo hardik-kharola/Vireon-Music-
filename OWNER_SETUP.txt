@@ -1,0 +1,14 @@
+Vireon Owner/Developer setup
+
+Authorized bot owners retained:
+- ESCOBAR
+- Oewe
+
+No other configured main/second owners are retained in bot.db.
+No other users are preconfigured with bot owner/developer access.
+
+The two existing authorized Discord IDs in the source are:
+- 1458089824350240781
+- 722299207452459060
+
+Do not put your Discord bot token in source files. Put it only in .env as DISCORD_TOKEN=.
