@@ -37,6 +37,16 @@ YDL_OPTIONS = {
     "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
     "extract_flat": False,
+
+    "js_runtimes": {
+        "node": {}
+    },
+
+    "extractor_args": {
+        "youtubepot-bgutilhttp": {
+            "base_url": "http://127.0.0.1:4416"
+        }
+    },
 }
 
 FFMPEG_OPTIONS = {
