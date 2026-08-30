@@ -1,22 +1,36 @@
-# Vireon
+# Vireon Music
 
-Clean Python Discord bot source.
+Standalone Discord music bot with a Vireon dark, icon-first player UI.
+
+## Commands
+
+- `/play <query>`
+- `/pause`
+- `/resume`
+- `/skip`
+- `/previous`
+- `/stop`
+- `/queue`
+- `/nowplaying`
+- `/volume <1-100>`
+- `/shuffle`
+- `/loop [mode]`
+- `/remove <position>`
+- `/clear`
+- `/join`
+- `/leave`
 
 ## Setup
-1. Copy `.env.example` to `.env`.
-2. Put your NEW Discord bot token in `DISCORD_TOKEN=`.
-3. Put the Discord public key in `DISCORD_PUBLIC_KEY=` if your interaction webserver needs it.
-4. `VIREON_OWNER_ID` is preconfigured with the two retained Vireon owners (ESCOBAR and Oewe).
-5. Install dependencies: `python -m pip install -r requirements.txt`
-6. Start: `python main.py`
 
-Never share `.env` or a bot token.
+1. Install Python 3.11+.
+2. Install FFmpeg and make sure `ffmpeg -version` works, or set `FFMPEG_PATH` in `.env`.
+3. Copy `.env.example` to `.env`.
+4. Put your Discord bot token in `.env` as `DISCORD_TOKEN=...`.
+5. Install dependencies: `py -m pip install -r requirements.txt`.
+6. Start: `py main.py`.
 
-## Included customization
-- Existing Python Vireon cogs and commands from the clean source.
-- Owner/developer configuration.
-- No-prefix system.
-- UPI/LTC/payment systems.
-- Ticket system with the existing panel editor plus an additional Pre-Open Questions button.
-- Pre-open questions are asked before a ticket channel is created and answers are placed in the ticket welcome embed.
-- Footer defaults used by the ticket system: `Crafted by Escobar | Hardik`.
+The bot uses yt-dlp for supported music search/stream resolution and FFmpeg for Discord voice playback.
+
+## UI
+
+The player uses text glyphs such as `▶`, `Ⅱ`, `|◀`, `▶|`, `↻`, `◀◀`, `⇄`, `×`, and `≡` rather than colorful emoji characters. Discord controls are rendered with native Discord button styling, so exact CSS from a screenshot cannot be reproduced inside Discord.

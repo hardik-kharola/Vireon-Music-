@@ -1,7 +1,4 @@
-discord.py
-python-dotenv
-aiosqlite==0.19.0
-cryptography
-wavelink
-davey
-Pillow
+discord.py>=2.6.0
+python-dotenv>=1.0.1
+yt-dlp>=2026.8.0
+PyNaCl>=1.5.0
