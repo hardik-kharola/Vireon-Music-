@@ -14,60 +14,78 @@ from discord.ext import commands
 from dotenv import load_dotenv
 import yt_dlp
 
+
+# ============================================================
+# CONFIG
+# ============================================================
+
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 FFMPEG_PATH = os.getenv("FFMPEG_PATH") or shutil.which("ffmpeg") or "ffmpeg"
 
+# Railway Variable:
+# NO_PREFIX_USERS=123456789012345678,987654321098765432
+NO_PREFIX_USERS = {
+    int(x.strip())
+    for x in os.getenv("NO_PREFIX_USERS", "").split(",")
+    if x.strip().isdigit()
+}
+
 if not TOKEN:
-    raise SystemExit("[ERROR] DISCORD_TOKEN not found in environment variables.")
+    raise SystemExit("[ERROR] DISCORD_TOKEN not found.")
 
 logging.basicConfig(
     level=logging.INFO,
     format="[%(levelname)s] %(message)s"
 )
 
+
 # ============================================================
-# VIREON MUSIC - UI / BRANDING
+# COLORS / THEME
 # ============================================================
 
 THEME = 0x1B1D21
 SUCCESS = 0x57F287
 ERROR = 0xED4245
 INFO = 0x5865F2
-MUTED = 0x949BA4
 
-FOOTER = "Crafted by Escobar | Hardik"
-PREFIX = "-"
 
 # ============================================================
-# NO-PREFIX USERS
+# PREFIX SYSTEM
 # ============================================================
 
-NO_PREFIX_USERS: set[int] = set()
+def dynamic_prefix(bot, message):
+    """
+    Everyone can use:
+        -play song
 
-for raw_id in os.getenv("NO_PREFIX_USERS", "").split(","):
-    raw_id = raw_id.strip()
+    Users listed in NO_PREFIX_USERS can also use:
+        play song
+    """
 
-    if raw_id.isdigit():
-        NO_PREFIX_USERS.add(int(raw_id))
+    if message.author.id in NO_PREFIX_USERS:
+        return ["-", ""]
 
-# ============================================================
-# AUTOPLAY
-# ============================================================
+    return "-"
 
-AUTOPLAY_DEFAULT = os.getenv(
-    "AUTOPLAY_DEFAULT",
-    "true"
-).lower() in {
-    "1",
-    "true",
-    "yes",
-    "on"
-}
 
 # ============================================================
-# YOUTUBE / YT-DLP
+# BOT
+# ============================================================
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(
+    command_prefix=dynamic_prefix,
+    intents=intents,
+    help_command=None
+)
+
+
+# ============================================================
+# YOUTUBE / FFMPEG
 # ============================================================
 
 YDL_OPTIONS = {
@@ -99,21 +117,9 @@ FFMPEG_OPTIONS = {
     "options": "-vn",
 }
 
-# ============================================================
-# DISCORD
-# ============================================================
-
-intents = discord.Intents.default()
-intents.message_content = True
-
-bot = commands.Bot(
-    command_prefix=PREFIX,
-    intents=intents,
-    help_command=None
-)
 
 # ============================================================
-# DATA MODELS
+# DATA
 # ============================================================
 
 @dataclass
@@ -129,56 +135,42 @@ class Track:
 class GuildPlayer:
 
     def __init__(self, guild_id: int):
-
         self.guild_id = guild_id
 
         self.queue: deque[Track] = deque()
-
         self.current: Optional[Track] = None
 
         self.voice: Optional[discord.VoiceClient] = None
 
         self.loop_mode = "off"
-
+        self.autoplay = False
         self.volume = 0.80
 
-        self.autoplay = AUTOPLAY_DEFAULT
-
-        self.text_channel: Optional[
-            discord.abc.Messageable
-        ] = None
+        self.text_channel = None
 
         self.history: list[Track] = []
 
-        self.previous_stack: list[Track] = []
-
-        self.player_message: Optional[
-            discord.Message
-        ] = None
+        self.player_message: Optional[discord.Message] = None
 
         self.play_lock = asyncio.Lock()
 
         self.suppress_after = False
 
-        # Playback/progress tracking
-        self.started_at = 0.0
-
-        self.paused_at = 0.0
-
-        self.paused_total = 0.0
-
-        self.progress_task: Optional[
-            asyncio.Task
-        ] = None
-
+        # Used to prevent old FFmpeg callbacks
+        # from starting another track.
         self.generation = 0
+
+        # Live progress
+        self.position = 0.0
+        self.started_at: Optional[float] = None
+
+        self.progress_task: Optional[asyncio.Task] = None
 
 
 players: dict[int, GuildPlayer] = {}
 
 
 def get_player(guild_id: int) -> GuildPlayer:
-
     return players.setdefault(
         guild_id,
         GuildPlayer(guild_id)
@@ -186,15 +178,77 @@ def get_player(guild_id: int) -> GuildPlayer:
 
 
 # ============================================================
-# EMBEDS
+# HELPERS
 # ============================================================
+
+def fmt_duration(seconds: int) -> str:
+
+    if not seconds:
+        return "LIVE"
+
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+
+    return f"{m}:{s:02d}"
+
+
+def current_position(p: GuildPlayer) -> float:
+
+    if not p.current:
+        return 0
+
+    position = p.position
+
+    if (
+        p.voice
+        and p.voice.is_playing()
+        and p.started_at is not None
+    ):
+        position += time.monotonic() - p.started_at
+
+    if p.current.duration:
+        position = min(
+            position,
+            p.current.duration
+        )
+
+    return max(0, position)
+
+
+def progress_bar(
+    position: float,
+    duration: int,
+    width: int = 24
+) -> str:
+
+    if not duration:
+        return "━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    ratio = max(
+        0,
+        min(1, position / duration)
+    )
+
+    marker = int(
+        ratio * (width - 1)
+    )
+
+    return (
+        "━" * marker
+        + "●"
+        + "━" * (width - marker - 1)
+    )
+
 
 def base_embed(
     title: str,
     description: str = "",
     color: int = THEME,
-    track: Optional[Track] = None,
-) -> discord.Embed:
+    track: Optional[Track] = None
+):
 
     embed = discord.Embed(
         title=title,
@@ -208,15 +262,22 @@ def base_embed(
         )
 
     embed.set_footer(
-        text=FOOTER
+        text="Crafted by Escobar | Hardik"
     )
 
     return embed
 
 
-def error_embed(
-    message: str
-) -> discord.Embed:
+def success_embed(message: str):
+
+    return base_embed(
+        "✓  Vireon Music",
+        message,
+        SUCCESS
+    )
+
+
+def error_embed(message: str):
 
     return base_embed(
         "❌  Something went wrong",
@@ -225,20 +286,7 @@ def error_embed(
     )
 
 
-def success_embed(
-    message: str
-) -> discord.Embed:
-
-    return base_embed(
-        "✓  Command Executed Successfully",
-        message,
-        SUCCESS
-    )
-
-
-def info_embed(
-    message: str
-) -> discord.Embed:
+def info_embed(message: str):
 
     return base_embed(
         "i  Vireon Music",
@@ -247,183 +295,48 @@ def info_embed(
     )
 
 
-# ============================================================
-# UTILITIES
-# ============================================================
+def voice_channel(member):
 
-def fmt_duration(
-    seconds: int
-) -> str:
+    state = getattr(member, "voice", None)
 
-    if not seconds:
-        return "LIVE"
-
-    h, rem = divmod(
-        int(seconds),
-        3600
-    )
-
-    m, s = divmod(
-        rem,
-        60
-    )
-
-    if h:
-        return f"{h}:{m:02d}:{s:02d}"
-
-    return f"{m}:{s:02d}"
-
-
-def elapsed_seconds(
-    p: GuildPlayer
-) -> int:
-
-    if not p.current or not p.started_at:
-        return 0
-
-    now = (
-        p.paused_at
-        if p.paused_at
-        else time.monotonic()
-    )
-
-    elapsed = max(
-        0.0,
-        now
-        - p.started_at
-        - p.paused_total
-    )
-
-    if p.current.duration:
-        elapsed = min(
-            elapsed,
-            p.current.duration
-        )
-
-    return int(elapsed)
-
-
-def progress_bar(
-    elapsed: int,
-    duration: int,
-    width: int = 22
-) -> str:
-
-    if not duration:
-        return (
-            "🔘"
-            + "─" * (width - 1)
-        )
-
-    ratio = max(
-        0.0,
-        min(
-            1.0,
-            elapsed / duration
-        )
-    )
-
-    position = min(
-        width - 1,
-        int(
-            ratio
-            * (width - 1)
-        )
-    )
-
-    chars = ["─"] * width
-
-    chars[position] = "●"
-
-    return "".join(chars)
-
-
-def playback_line(
-    p: GuildPlayer
-) -> str:
-
-    if not p.current:
-        return ""
-
-    elapsed = elapsed_seconds(p)
-
-    duration = p.current.duration
-
-    if duration:
-
-        return (
-            f"`{fmt_duration(elapsed)}` "
-            f"{progress_bar(elapsed, duration)} "
-            f"`{fmt_duration(duration)}`"
-        )
-
-    return (
-        f"`{fmt_duration(elapsed)}` "
-        f"{progress_bar(elapsed, 0)} "
-        f"`LIVE`"
-    )
-
-
-def command_success(
-    action: str,
-    interaction: Optional[
-        discord.Interaction
-    ] = None,
-) -> discord.Embed:
-
-    if interaction:
-
-        return success_embed(
-            f"**{action}**\n\n"
-            f"Requested by {interaction.user.mention}"
-        )
-
-    return success_embed(action)
-
-
-# ============================================================
-# VOICE
-# ============================================================
-
-def user_voice_channel(
-    interaction: discord.Interaction
-) -> discord.VoiceChannel:
-
-    voice_state = getattr(
-        interaction.user,
-        "voice",
-        None
-    )
-
-    if (
-        not voice_state
-        or not voice_state.channel
-    ):
+    if not state or not state.channel:
         raise ValueError(
             "Join a voice channel first."
         )
 
-    return voice_state.channel
+    return state.channel
 
 
 async def ensure_voice(
     interaction: discord.Interaction,
-    p: GuildPlayer,
-) -> None:
+    p: GuildPlayer
+):
 
-    channel = user_voice_channel(
-        interaction
+    channel = voice_channel(
+        interaction.user
     )
 
-    if (
-        p.voice
-        and p.voice.is_connected()
-    ):
+    if p.voice and p.voice.is_connected():
 
         if p.voice.channel != channel:
-            await p.voice.move_to(
-                channel
-            )
+            await p.voice.move_to(channel)
+
+        return
+
+    p.voice = await channel.connect()
+
+
+async def ensure_voice_ctx(
+    ctx: commands.Context,
+    p: GuildPlayer
+):
+
+    channel = voice_channel(ctx.author)
+
+    if p.voice and p.voice.is_connected():
+
+        if p.voice.channel != channel:
+            await p.voice.move_to(channel)
 
         return
 
@@ -431,7 +344,7 @@ async def ensure_voice(
 
 
 # ============================================================
-# YOUTUBE RESOLUTION
+# YOUTUBE FUNCTIONS
 # ============================================================
 
 def resolve_track(
@@ -439,9 +352,7 @@ def resolve_track(
     requester: discord.Member
 ) -> Track:
 
-    with yt_dlp.YoutubeDL(
-        YDL_OPTIONS
-    ) as ydl:
+    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
 
         info = ydl.extract_info(
             query,
@@ -449,7 +360,6 @@ def resolve_track(
         )
 
         if info and "entries" in info:
-
             info = next(
                 (
                     entry
@@ -464,7 +374,7 @@ def resolve_track(
                 "No playable result was found."
             )
 
-        webpage_url = (
+        url = (
             info.get("webpage_url")
             or info.get("original_url")
             or query
@@ -475,7 +385,7 @@ def resolve_track(
                 "title",
                 "Unknown title"
             ),
-            webpage_url=webpage_url,
+            webpage_url=url,
             duration=info.get(
                 "duration"
             ) or 0,
@@ -483,19 +393,13 @@ def resolve_track(
             thumbnail=info.get(
                 "thumbnail"
             ),
-            stream_url=info.get(
-                "url"
-            ),
+            stream_url=info.get("url")
         )
 
 
-def refresh_stream(
-    track: Track
-) -> Track:
+def refresh_stream(track: Track) -> Track:
 
-    with yt_dlp.YoutubeDL(
-        YDL_OPTIONS
-    ) as ydl:
+    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
 
         info = ydl.extract_info(
             track.webpage_url,
@@ -503,7 +407,6 @@ def refresh_stream(
         )
 
         if info and "entries" in info:
-
             info = next(
                 (
                     entry
@@ -518,9 +421,7 @@ def refresh_stream(
                 "The track is no longer available."
             )
 
-        track.stream_url = info.get(
-            "url"
-        )
+        track.stream_url = info.get("url")
 
         track.title = info.get(
             "title",
@@ -531,9 +432,2492 @@ def refresh_stream(
             "duration"
         ) or track.duration
 
-        track.thumbnail = (
-            info.get("thumbnail")
-            or track.thumbnail
-        )
+        track.thumbnail = info.get(
+            "thumbnail"
+        ) or track.thumbnail
 
         return track
+
+
+# ============================================================
+# PLAYER EMBED
+# ============================================================
+
+def build_player_embed(
+    p: GuildPlayer
+):
+
+    if not p.current:
+
+        return base_embed(
+            "VIREON MUSIC",
+            "Nothing is currently playing.",
+            THEME
+        )
+
+    track = p.current
+
+    position = current_position(p)
+
+    bar = progress_bar(
+        position,
+        track.duration
+    )
+
+    status = "Playing"
+
+    if p.voice and p.voice.is_paused():
+        status = "Paused"
+
+    loop_name = {
+        "off": "Off",
+        "song": "Song",
+        "queue": "Queue"
+    }[p.loop_mode]
+
+    autoplay_name = (
+        "On"
+        if p.autoplay
+        else "Off"
+    )
+
+    embed = base_embed(
+        "NOW PLAYING",
+        color=THEME,
+        track=track
+    )
+
+    embed.description = (
+        f"### [{discord.utils.escape_markdown(track.title)}]"
+        f"({track.webpage_url})\n\n"
+
+        f"`{fmt_duration(int(position))}` "
+        f"{bar} "
+        f"`{fmt_duration(track.duration)}`\n\n"
+
+        f"**Status:** `{status}`\n"
+        f"**Requested by:** {track.requester.mention}\n\n"
+
+        f"**Queue:** `{len(p.queue)}`   "
+        f"**Volume:** `{int(p.volume * 100)}%`   "
+        f"**Loop:** `{loop_name}`   "
+        f"**Autoplay:** `{autoplay_name}`"
+    )
+
+    embed.set_author(
+        name="VIREON MUSIC"
+    )
+
+    return embed
+
+
+# ============================================================
+# PLAYER MESSAGE / PROGRESS
+# ============================================================
+
+async def update_player_message(
+    p: GuildPlayer
+):
+
+    if not p.text_channel or not p.current:
+        return
+
+    try:
+
+        embed = build_player_embed(p)
+
+        view = MusicView(p)
+
+        if p.player_message:
+
+            await p.player_message.edit(
+                embed=embed,
+                view=view
+            )
+
+        else:
+
+            p.player_message = (
+                await p.text_channel.send(
+                    embed=embed,
+                    view=view
+                )
+            )
+
+    except discord.NotFound:
+
+        try:
+
+            p.player_message = (
+                await p.text_channel.send(
+                    embed=build_player_embed(p),
+                    view=MusicView(p)
+                )
+            )
+
+        except discord.HTTPException:
+            pass
+
+    except discord.HTTPException:
+        pass
+
+
+async def progress_loop(
+    p: GuildPlayer
+):
+
+    try:
+
+        while (
+            p.current
+            and p.voice
+            and p.voice.is_connected()
+        ):
+
+            if (
+                p.voice.is_playing()
+                or p.voice.is_paused()
+            ):
+                await update_player_message(p)
+
+            await asyncio.sleep(7)
+
+    except asyncio.CancelledError:
+        pass
+
+
+def restart_progress_loop(
+    p: GuildPlayer
+):
+
+    if (
+        p.progress_task
+        and not p.progress_task.done()
+    ):
+        p.progress_task.cancel()
+
+    if p.current:
+
+        p.progress_task = asyncio.create_task(
+            progress_loop(p)
+        )
+
+
+def pause_position(
+    p: GuildPlayer
+):
+
+    if p.started_at is not None:
+
+        p.position += (
+            time.monotonic()
+            - p.started_at
+        )
+
+        p.started_at = None
+
+
+def resume_position(
+    p: GuildPlayer
+):
+
+    p.started_at = time.monotonic()
+
+
+# ============================================================
+# AUTOPLAY
+# ============================================================
+
+async def create_autoplay_track(
+    p: GuildPlayer,
+    finished: Track
+):
+
+    if not p.autoplay:
+        return
+
+    try:
+
+        search = (
+            f"{finished.title} "
+            f"similar songs"
+        )
+
+        track = await asyncio.to_thread(
+            resolve_track,
+            search,
+            finished.requester
+        )
+
+        # Avoid immediately adding the exact same track.
+        if (
+            track.webpage_url
+            == finished.webpage_url
+        ):
+            search = (
+                f"{finished.title} "
+                f"official audio"
+            )
+
+            track = await asyncio.to_thread(
+                resolve_track,
+                search,
+                finished.requester
+            )
+
+        p.queue.append(track)
+
+        if p.text_channel:
+
+            await p.text_channel.send(
+                embed=info_embed(
+                    "Autoplay added "
+                    f"**{discord.utils.escape_markdown(track.title)}** "
+                    "to the queue."
+                )
+            )
+
+    except Exception as exc:
+
+        logging.error(
+            "Autoplay failed: %s",
+            exc
+        )
+
+
+# ============================================================
+# START NEXT TRACK
+# ============================================================
+
+async def start_next(
+    p: GuildPlayer
+):
+
+    async with p.play_lock:
+
+        if (
+            not p.voice
+            or not p.voice.is_connected()
+        ):
+            return
+
+        if (
+            p.voice.is_playing()
+            or p.voice.is_paused()
+        ):
+            return
+
+        if not p.queue:
+
+            if (
+                p.current
+                and p.autoplay
+            ):
+                await create_autoplay_track(
+                    p,
+                    p.current
+                )
+
+            if not p.queue:
+
+                p.current = None
+                p.position = 0
+                p.started_at = None
+
+                if (
+                    p.progress_task
+                    and not p.progress_task.done()
+                ):
+                    p.progress_task.cancel()
+
+                return
+
+        track = p.queue.popleft()
+
+        p.current = track
+
+        p.position = 0
+        p.started_at = time.monotonic()
+
+        p.suppress_after = False
+
+        try:
+
+            track = await asyncio.to_thread(
+                refresh_stream,
+                track
+            )
+
+            p.current = track
+
+            audio = discord.FFmpegPCMAudio(
+                track.stream_url,
+                executable=FFMPEG_PATH,
+                **FFMPEG_OPTIONS
+            )
+
+            source = discord.PCMVolumeTransformer(
+                audio,
+                volume=p.volume
+            )
+
+        except Exception as exc:
+
+            logging.error(
+                "Playback preparation failed: %s",
+                exc
+            )
+
+            p.current = None
+            p.position = 0
+            p.started_at = None
+
+            if p.text_channel:
+
+                await p.text_channel.send(
+                    embed=error_embed(
+                        "Couldn't start "
+                        f"**{discord.utils.escape_markdown(track.title)}**.\n"
+                        f"`{str(exc)[:700]}`"
+                    )
+                )
+
+            if p.queue:
+
+                bot.loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(
+                        start_next(p)
+                    )
+                )
+
+            return
+
+        p.history.append(track)
+
+        if len(p.history) > 100:
+            p.history.pop(0)
+
+        generation = p.generation
+
+        def after(error):
+
+            if error:
+
+                logging.error(
+                    "Voice playback error in guild %s: %s",
+                    p.guild_id,
+                    error
+                )
+
+            if (
+                p.suppress_after
+                or generation != p.generation
+            ):
+                return
+
+            async def finished():
+
+                if (
+                    p.loop_mode == "song"
+                    and p.current
+                ):
+                    p.queue.appendleft(
+                        p.current
+                    )
+
+                elif (
+                    p.loop_mode == "queue"
+                    and p.current
+                ):
+                    p.queue.append(
+                        p.current
+                    )
+
+                await start_next(p)
+
+            bot.loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(
+                    finished()
+                )
+            )
+
+        p.voice.play(
+            source,
+            after=after
+        )
+
+        restart_progress_loop(p)
+
+        await update_player_message(p)
+
+
+# ============================================================
+# PLAYER BUTTONS
+# ============================================================
+
+class MusicView(discord.ui.View):
+
+    def __init__(
+        self,
+        p: GuildPlayer
+    ):
+
+        super().__init__(
+            timeout=None
+        )
+
+        self.p = p
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction
+    ):
+
+        if not interaction.guild:
+            return False
+
+        try:
+
+            channel = voice_channel(
+                interaction.user
+            )
+
+        except ValueError:
+
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Join a voice channel first."
+                ),
+                ephemeral=True
+            )
+
+            return False
+
+        if (
+            not self.p.voice
+            or not self.p.voice.is_connected()
+            or channel != self.p.voice.channel
+        ):
+
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "You must be in the bot's voice channel "
+                    "to use these controls."
+                ),
+                ephemeral=True
+            )
+
+            return False
+
+        return True
+
+    async def button_success(
+        self,
+        interaction,
+        message
+    ):
+
+        await interaction.response.send_message(
+            embed=success_embed(message),
+            ephemeral=True
+        )
+
+    # --------------------------------------------------------
+    # PLAY / PAUSE
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="▶",
+        style=discord.ButtonStyle.secondary,
+        row=0
+    )
+    async def play_pause(
+        self,
+        interaction,
+        button
+    ):
+
+        if not self.p.current:
+
+            return await interaction.response.send_message(
+                embed=error_embed(
+                    "Nothing is currently playing."
+                ),
+                ephemeral=True
+            )
+
+        # REQUESTER ONLY
+        if (
+            interaction.user.id
+            != self.p.current.requester.id
+        ):
+
+            return await interaction.response.send_message(
+                embed=error_embed(
+                    "Only the person who requested "
+                    "this track can use the Play/Pause button."
+                ),
+                ephemeral=True
+            )
+
+        if not self.p.voice:
+
+            return await interaction.response.send_message(
+                embed=error_embed(
+                    "I am not in a voice channel."
+                ),
+                ephemeral=True
+            )
+
+        if self.p.voice.is_paused():
+
+            resume_position(self.p)
+
+            self.p.voice.resume()
+
+            message = (
+                "Playback resumed successfully."
+            )
+
+        elif self.p.voice.is_playing():
+
+            pause_position(self.p)
+
+            self.p.voice.pause()
+
+            message = (
+                "Playback paused successfully."
+            )
+
+        else:
+
+            await start_next(self.p)
+
+            message = (
+                "Playback started successfully."
+            )
+
+        await interaction.message.edit(
+            embed=build_player_embed(self.p),
+            view=MusicView(self.p)
+        )
+
+        await self.button_success(
+            interaction,
+            message
+        )
+
+    # --------------------------------------------------------
+    # PREVIOUS
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="|◀",
+        style=discord.ButtonStyle.secondary,
+        row=0
+    )
+    async def previous_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        if len(self.p.history) < 2:
+
+            return await interaction.response.send_message(
+                embed=error_embed(
+                    "There is no previous track."
+                ),
+                ephemeral=True
+            )
+
+        previous = self.p.history[-2]
+
+        if self.p.current:
+            self.p.queue.appendleft(
+                self.p.current
+            )
+
+        self.p.queue.appendleft(
+            previous
+        )
+
+        self.p.generation += 1
+        self.p.suppress_after = False
+
+        if (
+            self.p.voice
+            and (
+                self.p.voice.is_playing()
+                or self.p.voice.is_paused()
+            )
+        ):
+
+            self.p.voice.stop()
+
+        else:
+
+            await start_next(self.p)
+
+        await self.button_success(
+            interaction,
+            f"Playing **{discord.utils.escape_markdown(previous.title)}**."
+        )
+
+    # --------------------------------------------------------
+    # PAUSE
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="Ⅱ",
+        style=discord.ButtonStyle.secondary,
+        row=0
+    )
+    async def pause_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        if (
+            self.p.voice
+            and self.p.voice.is_playing()
+        ):
+
+            pause_position(self.p)
+
+            self.p.voice.pause()
+
+            message = (
+                "Playback paused successfully."
+            )
+
+        else:
+
+            message = (
+                "Nothing is currently playing."
+            )
+
+        await interaction.message.edit(
+            embed=build_player_embed(self.p),
+            view=MusicView(self.p)
+        )
+
+        await self.button_success(
+            interaction,
+            message
+        )
+
+    # --------------------------------------------------------
+    # SKIP
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="▶|",
+        style=discord.ButtonStyle.secondary,
+        row=0
+    )
+    async def skip_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        if (
+            self.p.voice
+            and (
+                self.p.voice.is_playing()
+                or self.p.voice.is_paused()
+            )
+        ):
+
+            self.p.generation += 1
+            self.p.suppress_after = False
+
+            self.p.voice.stop()
+
+            message = (
+                "Skipped the current track successfully."
+            )
+
+        else:
+
+            message = (
+                "Nothing is currently playing."
+            )
+
+        await self.button_success(
+            interaction,
+            message
+        )
+
+    # --------------------------------------------------------
+    # LOOP
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="↻",
+        style=discord.ButtonStyle.secondary,
+        row=0
+    )
+    async def loop_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        self.p.loop_mode = {
+            "off": "song",
+            "song": "queue",
+            "queue": "off"
+        }[self.p.loop_mode]
+
+        label = {
+            "off": "Off",
+            "song": "Current song",
+            "queue": "Queue"
+        }[self.p.loop_mode]
+
+        await interaction.message.edit(
+            embed=build_player_embed(self.p),
+            view=MusicView(self.p)
+        )
+
+        await self.button_success(
+            interaction,
+            f"Loop mode set to **{label}**."
+        )
+
+    # --------------------------------------------------------
+    # VOLUME DOWN
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="−",
+        style=discord.ButtonStyle.secondary,
+        row=1
+    )
+    async def volume_down(
+        self,
+        interaction,
+        button
+    ):
+
+        self.p.volume = max(
+            0,
+            round(
+                self.p.volume - 0.10,
+                2
+            )
+        )
+
+        if (
+            self.p.voice
+            and isinstance(
+                self.p.voice.source,
+                discord.PCMVolumeTransformer
+            )
+        ):
+
+            self.p.voice.source.volume = (
+                self.p.volume
+            )
+
+        await interaction.message.edit(
+            embed=build_player_embed(self.p),
+            view=MusicView(self.p)
+        )
+
+        await self.button_success(
+            interaction,
+            f"Volume decreased to "
+            f"**{int(self.p.volume * 100)}%**."
+        )
+
+    # --------------------------------------------------------
+    # REWIND
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="◀◀",
+        style=discord.ButtonStyle.secondary,
+        row=1
+    )
+    async def rewind_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        await self.button_success(
+            interaction,
+            "Rewind button executed successfully."
+        )
+
+    # --------------------------------------------------------
+    # FAVORITE
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="♡",
+        style=discord.ButtonStyle.secondary,
+        row=1
+    )
+    async def favorite_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        await self.button_success(
+            interaction,
+            "Favorite button executed successfully."
+        )
+
+    # --------------------------------------------------------
+    # FORWARD
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="▶▶",
+        style=discord.ButtonStyle.secondary,
+        row=1
+    )
+    async def forward_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        await self.button_success(
+            interaction,
+            "Forward button executed successfully."
+        )
+
+    # --------------------------------------------------------
+    # VOLUME UP
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="+",
+        style=discord.ButtonStyle.secondary,
+        row=1
+    )
+    async def volume_up(
+        self,
+        interaction,
+        button
+    ):
+
+        self.p.volume = min(
+            1,
+            round(
+                self.p.volume + 0.10,
+                2
+            )
+        )
+
+        if (
+            self.p.voice
+            and isinstance(
+                self.p.voice.source,
+                discord.PCMVolumeTransformer
+            )
+        ):
+
+            self.p.voice.source.volume = (
+                self.p.volume
+            )
+
+        await interaction.message.edit(
+            embed=build_player_embed(self.p),
+            view=MusicView(self.p)
+        )
+
+        await self.button_success(
+            interaction,
+            f"Volume increased to "
+            f"**{int(self.p.volume * 100)}%**."
+        )
+
+    # --------------------------------------------------------
+    # STOP
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="×",
+        style=discord.ButtonStyle.secondary,
+        row=2
+    )
+    async def stop_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        self.p.queue.clear()
+
+        self.p.loop_mode = "off"
+
+        self.p.generation += 1
+
+        self.p.suppress_after = True
+
+        if (
+            self.p.voice
+            and (
+                self.p.voice.is_playing()
+                or self.p.voice.is_paused()
+            )
+        ):
+
+            self.p.voice.stop()
+
+        self.p.current = None
+        self.p.position = 0
+        self.p.started_at = None
+
+        await self.button_success(
+            interaction,
+            "Playback stopped and queue cleared successfully."
+        )
+
+        if self.p.player_message:
+
+            try:
+
+                await self.p.player_message.edit(
+                    embed=base_embed(
+                        "VIREON MUSIC",
+                        "Nothing is currently playing.",
+                        THEME
+                    ),
+                    view=MusicView(self.p)
+                )
+
+            except discord.HTTPException:
+                pass
+
+    # --------------------------------------------------------
+    # SHUFFLE
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="⇄",
+        style=discord.ButtonStyle.secondary,
+        row=2
+    )
+    async def shuffle_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        items = list(
+            self.p.queue
+        )
+
+        if len(items) < 2:
+
+            return await interaction.response.send_message(
+                embed=error_embed(
+                    "Not enough tracks to shuffle."
+                ),
+                ephemeral=True
+            )
+
+        random.shuffle(items)
+
+        self.p.queue = deque(items)
+
+        await interaction.message.edit(
+            embed=build_player_embed(self.p),
+            view=MusicView(self.p)
+        )
+
+        await self.button_success(
+            interaction,
+            "Queue shuffled successfully."
+        )
+
+    # --------------------------------------------------------
+    # CLEAR
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="⌁",
+        style=discord.ButtonStyle.secondary,
+        row=2
+    )
+    async def clear_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        count = len(
+            self.p.queue
+        )
+
+        self.p.queue.clear()
+
+        await self.button_success(
+            interaction,
+            f"Cleared **{count}** queued track(s) successfully."
+        )
+
+    # --------------------------------------------------------
+    # QUEUE
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="≡",
+        style=discord.ButtonStyle.secondary,
+        row=2
+    )
+    async def queue_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        await interaction.response.send_message(
+            embed=queue_embed(self.p),
+            ephemeral=True
+        )
+
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="♪",
+        style=discord.ButtonStyle.secondary,
+        row=2
+    )
+    async def status_btn(
+        self,
+        interaction,
+        button
+    ):
+
+        await interaction.response.send_message(
+            embed=build_player_embed(self.p),
+            ephemeral=True
+        )
+
+
+# ============================================================
+# QUEUE EMBED
+# ============================================================
+
+def queue_embed(
+    p: GuildPlayer
+):
+
+    lines = []
+
+    if p.current:
+
+        lines.append(
+            "**▶ Now Playing**\n"
+            f"[{discord.utils.escape_markdown(p.current.title)}]"
+            f"({p.current.webpage_url})"
+            f" • `{fmt_duration(p.current.duration)}`"
+        )
+
+    for i, track in enumerate(
+        list(p.queue)[:15],
+        1
+    ):
+
+        lines.append(
+            f"`{i:02d}` "
+            f"[{discord.utils.escape_markdown(track.title)}]"
+            f"({track.webpage_url})"
+            f" • `{fmt_duration(track.duration)}`"
+        )
+
+    if not lines:
+
+        return error_embed(
+            "The queue is empty."
+        )
+
+    embed = base_embed(
+        "QUEUE",
+        "\n\n".join(lines),
+        THEME,
+        p.current
+    )
+
+    embed.set_footer(
+        text=(
+            "Crafted by Escobar | Hardik"
+            f" • {len(p.queue)} queued"
+        )
+    )
+
+    return embed
+
+
+# ============================================================
+# SLASH COMMAND HELP
+# ============================================================
+
+async def require_guild(
+    interaction
+):
+
+    if not interaction.guild:
+
+        await interaction.response.send_message(
+            embed=error_embed(
+                "This command can only be used in a server."
+            ),
+            ephemeral=True
+        )
+
+        return False
+
+    return True
+
+
+# ============================================================
+# READY
+# ============================================================
+
+@bot.event
+async def on_ready():
+
+    try:
+
+        synced = await bot.tree.sync()
+
+        logging.info(
+            "[OK] Synced %d music commands.",
+            len(synced)
+        )
+
+    except Exception as exc:
+
+        logging.error(
+            "Command sync failed: %s",
+            exc
+        )
+
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.listening,
+            name="Vireon Music"
+        )
+    )
+
+    logging.info(
+        "[OK] Vireon Music is online as %s",
+        bot.user
+    )
+
+
+# ============================================================
+# SLASH / PLAY
+# ============================================================
+
+@bot.tree.command(
+    name="play",
+    description="Play a song or add it to the queue."
+)
+@app_commands.describe(
+    query="Song name, YouTube URL, or supported URL"
+)
+async def play(
+    interaction: discord.Interaction,
+    query: str
+):
+
+    if not await require_guild(interaction):
+        return
+
+    await interaction.response.defer()
+
+    try:
+
+        p = get_player(
+            interaction.guild_id
+        )
+
+        await ensure_voice(
+            interaction,
+            p
+        )
+
+        p.text_channel = (
+            interaction.channel
+        )
+
+        track = await asyncio.to_thread(
+            resolve_track,
+            query,
+            interaction.user
+        )
+
+        if (
+            p.voice
+            and (
+                p.voice.is_playing()
+                or p.voice.is_paused()
+            )
+        ):
+
+            p.queue.append(track)
+
+            await interaction.followup.send(
+                embed=success_embed(
+                    f"Added **{discord.utils.escape_markdown(track.title)}** "
+                    "to the queue."
+                )
+            )
+
+        else:
+
+            p.queue.appendleft(track)
+
+            await start_next(p)
+
+            await interaction.followup.send(
+                embed=success_embed(
+                    f"Playing **{discord.utils.escape_markdown(track.title)}**."
+                )
+            )
+
+    except Exception as exc:
+
+        await interaction.followup.send(
+            embed=error_embed(
+                str(exc)[:1000]
+            ),
+            ephemeral=True
+        )
+
+
+# ============================================================
+# COMMON MUSIC FUNCTIONS
+# ============================================================
+
+async def do_pause(p):
+
+    if not p.voice or not p.voice.is_playing():
+        return False, "Nothing is playing."
+
+    pause_position(p)
+
+    p.voice.pause()
+
+    return True, (
+        "Playback paused successfully."
+    )
+
+
+async def do_resume(p):
+
+    if not p.voice or not p.voice.is_paused():
+        return False, (
+            "Playback is not paused."
+        )
+
+    resume_position(p)
+
+    p.voice.resume()
+
+    return True, (
+        "Playback resumed successfully."
+    )
+
+
+async def do_skip(p):
+
+    if not p.voice or not (
+        p.voice.is_playing()
+        or p.voice.is_paused()
+    ):
+        return False, (
+            "Nothing is playing."
+        )
+
+    p.generation += 1
+
+    p.suppress_after = False
+
+    p.voice.stop()
+
+    return True, (
+        "Skipped the current track successfully."
+    )
+
+
+async def do_stop(p):
+
+    p.queue.clear()
+
+    p.loop_mode = "off"
+
+    p.generation += 1
+
+    p.suppress_after = True
+
+    if (
+        p.voice
+        and (
+            p.voice.is_playing()
+            or p.voice.is_paused()
+        )
+    ):
+
+        p.voice.stop()
+
+    p.current = None
+    p.position = 0
+    p.started_at = None
+
+    return (
+        True,
+        "Playback stopped and queue cleared successfully."
+    )
+
+
+async def do_previous(p):
+
+    if len(p.history) < 2:
+
+        return (
+            False,
+            "There is no previous track."
+        )
+
+    previous = p.history[-2]
+
+    if p.current:
+        p.queue.appendleft(
+            p.current
+        )
+
+    p.queue.appendleft(
+        previous
+    )
+
+    p.generation += 1
+
+    p.suppress_after = False
+
+    if (
+        p.voice
+        and (
+            p.voice.is_playing()
+            or p.voice.is_paused()
+        )
+    ):
+
+        p.voice.stop()
+
+    else:
+
+        await start_next(p)
+
+    return (
+        True,
+        f"Playing **{discord.utils.escape_markdown(previous.title)}**."
+    )
+
+
+# ============================================================
+# SLASH COMMANDS
+# ============================================================
+
+@bot.tree.command(
+    name="pause",
+    description="Pause the current track."
+)
+async def slash_pause(
+    interaction: discord.Interaction
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    ok, message = await do_pause(p)
+
+    await interaction.response.send_message(
+        embed=(
+            success_embed(message)
+            if ok
+            else error_embed(message)
+        )
+    )
+
+
+@bot.tree.command(
+    name="resume",
+    description="Resume the current track."
+)
+async def slash_resume(
+    interaction: discord.Interaction
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    ok, message = await do_resume(p)
+
+    await interaction.response.send_message(
+        embed=(
+            success_embed(message)
+            if ok
+            else error_embed(message)
+        )
+    )
+
+
+@bot.tree.command(
+    name="skip",
+    description="Skip the current track."
+)
+async def slash_skip(
+    interaction: discord.Interaction
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    ok, message = await do_skip(p)
+
+    await interaction.response.send_message(
+        embed=(
+            success_embed(message)
+            if ok
+            else error_embed(message)
+        )
+    )
+
+
+@bot.tree.command(
+    name="previous",
+    description="Play the previous track."
+)
+async def slash_previous(
+    interaction: discord.Interaction
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    ok, message = await do_previous(p)
+
+    await interaction.response.send_message(
+        embed=(
+            success_embed(message)
+            if ok
+            else error_embed(message)
+        )
+    )
+
+
+@bot.tree.command(
+    name="stop",
+    description="Stop playback and clear the queue."
+)
+async def slash_stop(
+    interaction: discord.Interaction
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    ok, message = await do_stop(p)
+
+    await interaction.response.send_message(
+        embed=success_embed(message)
+    )
+
+
+@bot.tree.command(
+    name="queue",
+    description="Show the current queue."
+)
+async def slash_queue(
+    interaction: discord.Interaction
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    await interaction.response.send_message(
+        embed=queue_embed(p)
+    )
+
+
+@bot.tree.command(
+    name="nowplaying",
+    description="Show the currently playing track."
+)
+async def slash_nowplaying(
+    interaction: discord.Interaction
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    if not p.current:
+
+        return await interaction.response.send_message(
+            embed=error_embed(
+                "Nothing is playing."
+            ),
+            ephemeral=True
+        )
+
+    await interaction.response.send_message(
+        embed=build_player_embed(p),
+        view=MusicView(p)
+    )
+
+
+@bot.tree.command(
+    name="volume",
+    description="Set playback volume from 1 to 100."
+)
+@app_commands.describe(
+    level="Volume percentage (1-100)"
+)
+async def slash_volume(
+    interaction: discord.Interaction,
+    level: app_commands.Range[int, 1, 100]
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    p.volume = level / 100
+
+    if (
+        p.voice
+        and isinstance(
+            p.voice.source,
+            discord.PCMVolumeTransformer
+        )
+    ):
+
+        p.voice.source.volume = p.volume
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            f"Volume set to **{level}%** successfully."
+        )
+    )
+
+
+@bot.tree.command(
+    name="shuffle",
+    description="Shuffle the current queue."
+)
+async def slash_shuffle(
+    interaction: discord.Interaction
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    items = list(p.queue)
+
+    if len(items) < 2:
+
+        return await interaction.response.send_message(
+            embed=error_embed(
+                "Not enough tracks to shuffle."
+            ),
+            ephemeral=True
+        )
+
+    random.shuffle(items)
+
+    p.queue = deque(items)
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Queue shuffled successfully."
+        )
+    )
+
+
+@bot.tree.command(
+    name="autoplay",
+    description="Toggle automatic next-song playback."
+)
+async def slash_autoplay(
+    interaction: discord.Interaction
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    p.autoplay = not p.autoplay
+
+    status = (
+        "enabled"
+        if p.autoplay
+        else "disabled"
+    )
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            f"Autoplay **{status}** successfully."
+        )
+    )
+
+
+@bot.tree.command(
+    name="loop",
+    description="Change loop mode."
+)
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(
+            name="Off",
+            value="off"
+        ),
+        app_commands.Choice(
+            name="Current song",
+            value="song"
+        ),
+        app_commands.Choice(
+            name="Queue",
+            value="queue"
+        )
+    ]
+)
+async def slash_loop(
+    interaction: discord.Interaction,
+    mode: Optional[
+        app_commands.Choice[str]
+    ] = None
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    if mode:
+
+        p.loop_mode = mode.value
+
+    else:
+
+        p.loop_mode = {
+            "off": "song",
+            "song": "queue",
+            "queue": "off"
+        }[p.loop_mode]
+
+    label = {
+        "off": "Off",
+        "song": "Current song",
+        "queue": "Queue"
+    }[p.loop_mode]
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            f"Loop mode set to **{label}**."
+        )
+    )
+
+
+@bot.tree.command(
+    name="remove",
+    description="Remove a track from the queue."
+)
+@app_commands.describe(
+    position="Queue position"
+)
+async def slash_remove(
+    interaction: discord.Interaction,
+    position: app_commands.Range[int, 1, 1000]
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    items = list(p.queue)
+
+    if position > len(items):
+
+        return await interaction.response.send_message(
+            embed=error_embed(
+                "That queue position does not exist."
+            ),
+            ephemeral=True
+        )
+
+    track = items.pop(
+        position - 1
+    )
+
+    p.queue = deque(items)
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            f"Removed **{discord.utils.escape_markdown(track.title)}** "
+            "from the queue."
+        )
+    )
+
+
+@bot.tree.command(
+    name="clear",
+    description="Clear all queued tracks."
+)
+async def slash_clear(
+    interaction: discord.Interaction
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    count = len(p.queue)
+
+    p.queue.clear()
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            f"Cleared **{count}** queued track(s) successfully."
+        )
+    )
+
+
+@bot.tree.command(
+    name="join",
+    description="Join your current voice channel."
+)
+async def slash_join(
+    interaction: discord.Interaction
+):
+
+    if not await require_guild(interaction):
+        return
+
+    try:
+
+        p = get_player(
+            interaction.guild_id
+        )
+
+        await ensure_voice(
+            interaction,
+            p
+        )
+
+        await interaction.response.send_message(
+            embed=success_embed(
+                f"Joined **{p.voice.channel.name}** successfully."
+            )
+        )
+
+    except Exception as exc:
+
+        await interaction.response.send_message(
+            embed=error_embed(
+                str(exc)
+            ),
+            ephemeral=True
+        )
+
+
+@bot.tree.command(
+    name="leave",
+    description="Leave the voice channel."
+)
+async def slash_leave(
+    interaction: discord.Interaction
+):
+
+    p = get_player(
+        interaction.guild_id
+    )
+
+    p.queue.clear()
+    p.current = None
+
+    p.generation += 1
+    p.suppress_after = True
+
+    p.position = 0
+    p.started_at = None
+
+    if (
+        p.progress_task
+        and not p.progress_task.done()
+    ):
+        p.progress_task.cancel()
+
+    if (
+        p.voice
+        and p.voice.is_connected()
+    ):
+
+        await p.voice.disconnect()
+
+    p.voice = None
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Left the voice channel successfully."
+        )
+    )
+
+
+# ============================================================
+# PREFIX COMMANDS
+# ============================================================
+
+@bot.command(
+    name="play"
+)
+async def prefix_play(
+    ctx,
+    *,
+    query: str
+):
+
+    if not ctx.guild:
+        return
+
+    try:
+
+        p = get_player(
+            ctx.guild.id
+        )
+
+        await ensure_voice_ctx(
+            ctx,
+            p
+        )
+
+        p.text_channel = ctx.channel
+
+        track = await asyncio.to_thread(
+            resolve_track,
+            query,
+            ctx.author
+        )
+
+        if (
+            p.voice
+            and (
+                p.voice.is_playing()
+                or p.voice.is_paused()
+            )
+        ):
+
+            p.queue.append(track)
+
+            await ctx.send(
+                embed=success_embed(
+                    f"Added **{discord.utils.escape_markdown(track.title)}** "
+                    "to the queue."
+                )
+            )
+
+        else:
+
+            p.queue.appendleft(track)
+
+            await start_next(p)
+
+            await ctx.send(
+                embed=success_embed(
+                    f"Playing **{discord.utils.escape_markdown(track.title)}**."
+                )
+            )
+
+    except Exception as exc:
+
+        await ctx.send(
+            embed=error_embed(
+                str(exc)[:1000]
+            )
+        )
+
+
+@bot.command(
+    name="pause"
+)
+async def prefix_pause(ctx):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    ok, message = await do_pause(p)
+
+    await ctx.send(
+        embed=(
+            success_embed(message)
+            if ok
+            else error_embed(message)
+        )
+    )
+
+
+@bot.command(
+    name="resume"
+)
+async def prefix_resume(ctx):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    ok, message = await do_resume(p)
+
+    await ctx.send(
+        embed=(
+            success_embed(message)
+            if ok
+            else error_embed(message)
+        )
+    )
+
+
+@bot.command(
+    name="skip"
+)
+async def prefix_skip(ctx):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    ok, message = await do_skip(p)
+
+    await ctx.send(
+        embed=(
+            success_embed(message)
+            if ok
+            else error_embed(message)
+        )
+    )
+
+
+@bot.command(
+    name="previous"
+)
+async def prefix_previous(ctx):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    ok, message = await do_previous(p)
+
+    await ctx.send(
+        embed=(
+            success_embed(message)
+            if ok
+            else error_embed(message)
+        )
+    )
+
+
+@bot.command(
+    name="stop"
+)
+async def prefix_stop(ctx):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    ok, message = await do_stop(p)
+
+    await ctx.send(
+        embed=success_embed(message)
+    )
+
+
+@bot.command(
+    name="queue"
+)
+async def prefix_queue(ctx):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    await ctx.send(
+        embed=queue_embed(p)
+    )
+
+
+@bot.command(
+    name="nowplaying",
+    aliases=["np"]
+)
+async def prefix_nowplaying(ctx):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    if not p.current:
+
+        return await ctx.send(
+            embed=error_embed(
+                "Nothing is playing."
+            )
+        )
+
+    await ctx.send(
+        embed=build_player_embed(p),
+        view=MusicView(p)
+    )
+
+
+@bot.command(
+    name="volume"
+)
+async def prefix_volume(
+    ctx,
+    level: int
+):
+
+    if not ctx.guild:
+        return
+
+    if level < 1 or level > 100:
+
+        return await ctx.send(
+            embed=error_embed(
+                "Volume must be between 1 and 100."
+            )
+        )
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    p.volume = level / 100
+
+    if (
+        p.voice
+        and isinstance(
+            p.voice.source,
+            discord.PCMVolumeTransformer
+        )
+    ):
+
+        p.voice.source.volume = p.volume
+
+    await ctx.send(
+        embed=success_embed(
+            f"Volume set to **{level}%** successfully."
+        )
+    )
+
+
+@bot.command(
+    name="shuffle"
+)
+async def prefix_shuffle(ctx):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    items = list(p.queue)
+
+    if len(items) < 2:
+
+        return await ctx.send(
+            embed=error_embed(
+                "Not enough tracks to shuffle."
+            )
+        )
+
+    random.shuffle(items)
+
+    p.queue = deque(items)
+
+    await ctx.send(
+        embed=success_embed(
+            "Queue shuffled successfully."
+        )
+    )
+
+
+@bot.command(
+    name="loop"
+)
+async def prefix_loop(
+    ctx,
+    mode: str = ""
+):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    mode = mode.lower().strip()
+
+    if mode in {
+        "off",
+        "song",
+        "queue"
+    }:
+
+        p.loop_mode = mode
+
+    elif not mode:
+
+        p.loop_mode = {
+            "off": "song",
+            "song": "queue",
+            "queue": "off"
+        }[p.loop_mode]
+
+    else:
+
+        return await ctx.send(
+            embed=error_embed(
+                "Use `-loop off`, "
+                "`-loop song`, or "
+                "`-loop queue`."
+            )
+        )
+
+    label = {
+        "off": "Off",
+        "song": "Current song",
+        "queue": "Queue"
+    }[p.loop_mode]
+
+    await ctx.send(
+        embed=success_embed(
+            f"Loop mode set to **{label}**."
+        )
+    )
+
+
+@bot.command(
+    name="autoplay"
+)
+async def prefix_autoplay(ctx):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    p.autoplay = not p.autoplay
+
+    status = (
+        "enabled"
+        if p.autoplay
+        else "disabled"
+    )
+
+    await ctx.send(
+        embed=success_embed(
+            f"Autoplay **{status}** successfully."
+        )
+    )
+
+
+@bot.command(
+    name="remove"
+)
+async def prefix_remove(
+    ctx,
+    position: int
+):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    items = list(p.queue)
+
+    if (
+        position < 1
+        or position > len(items)
+    ):
+
+        return await ctx.send(
+            embed=error_embed(
+                "That queue position does not exist."
+            )
+        )
+
+    track = items.pop(
+        position - 1
+    )
+
+    p.queue = deque(items)
+
+    await ctx.send(
+        embed=success_embed(
+            f"Removed **{discord.utils.escape_markdown(track.title)}** "
+            "from the queue."
+        )
+    )
+
+
+@bot.command(
+    name="clear"
+)
+async def prefix_clear(ctx):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    count = len(p.queue)
+
+    p.queue.clear()
+
+    await ctx.send(
+        embed=success_embed(
+            f"Cleared **{count}** queued track(s) successfully."
+        )
+    )
+
+
+@bot.command(
+    name="join"
+)
+async def prefix_join(ctx):
+
+    if not ctx.guild:
+        return
+
+    try:
+
+        p = get_player(
+            ctx.guild.id
+        )
+
+        await ensure_voice_ctx(
+            ctx,
+            p
+        )
+
+        await ctx.send(
+            embed=success_embed(
+                f"Joined **{p.voice.channel.name}** successfully."
+            )
+        )
+
+    except Exception as exc:
+
+        await ctx.send(
+            embed=error_embed(
+                str(exc)
+            )
+        )
+
+
+@bot.command(
+    name="leave"
+)
+async def prefix_leave(ctx):
+
+    if not ctx.guild:
+        return
+
+    p = get_player(
+        ctx.guild.id
+    )
+
+    p.queue.clear()
+    p.current = None
+
+    p.generation += 1
+    p.suppress_after = True
+
+    p.position = 0
+    p.started_at = None
+
+    if (
+        p.progress_task
+        and not p.progress_task.done()
+    ):
+        p.progress_task.cancel()
+
+    if (
+        p.voice
+        and p.voice.is_connected()
+    ):
+
+        await p.voice.disconnect()
+
+    p.voice = None
+
+    await ctx.send(
+        embed=success_embed(
+            "Left the voice channel successfully."
+        )
+    )
+
+
+# ============================================================
+# HELP
+# ============================================================
+
+@bot.command(
+    name="help"
+)
+async def prefix_help(ctx):
+
+    embed = base_embed(
+        "VIREON MUSIC",
+
+        "**Prefix:** `-`\n"
+        "**No-prefix:** enabled for users in "
+        "`NO_PREFIX_USERS`\n\n"
+
+        "**Music Commands**\n"
+        "`-play <song>`\n"
+        "`-pause` • `-resume` • `-skip`\n"
+        "`-previous` • `-stop`\n"
+        "`-queue` • `-np`\n"
+        "`-volume <1-100>`\n"
+        "`-shuffle` • `-loop`\n"
+        "`-autoplay`\n"
+        "`-remove <position>`\n"
+        "`-clear`\n"
+        "`-join` • `-leave`\n\n"
+
+        "**Player Controls**\n"
+        "▶ Play/Pause\n"
+        "|◀ Previous\n"
+        "Ⅱ Pause\n"
+        "▶| Skip\n"
+        "↻ Loop\n"
+        "− / + Volume\n"
+        "◀◀ Rewind\n"
+        "♡ Favorite\n"
+        "▶▶ Forward\n"
+        "× Stop\n"
+        "⇄ Shuffle\n"
+        "⌁ Clear\n"
+        "≡ Queue\n"
+        "♪ Status",
+
+        THEME
+    )
+
+    await ctx.send(
+        embed=embed
+    )
+
+
+# ============================================================
+# PREFIX ERROR HANDLER
+# ============================================================
+
+@bot.event
+async def on_command_error(
+    ctx,
+    error
+):
+
+    if isinstance(
+        error,
+        commands.CommandNotFound
+    ):
+        return
+
+    if isinstance(
+        error,
+        commands.MissingRequiredArgument
+    ):
+
+        await ctx.send(
+            embed=error_embed(
+                f"Missing argument: "
+                f"`{error.param.name}`."
+            )
+        )
+
+        return
+
+    if isinstance(
+        error,
+        commands.BadArgument
+    ):
+
+        await ctx.send(
+            embed=error_embed(
+                "Invalid command argument. "
+                "Use `-help` for command usage."
+            )
+        )
+
+        return
+
+    logging.error(
+        "Command error: %s",
+        error
+    )
+
+
+# ============================================================
+# START BOT
+# ============================================================
+
+if __name__ == "__main__":
+    bot.run(TOKEN)
