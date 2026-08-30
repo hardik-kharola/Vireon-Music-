@@ -1,6 +1,6 @@
-discord.py[voice]
-davey
-PyNaCl
-yt-dlp
-python-dotenv
-aiohttp
+discord.py>=2.7.1
+python-dotenv>=1.0.1
+yt-dlp>=2026.8.19
+yt-dlp-ejs
+bgutil-ytdlp-pot-provider
+PyNaCl>=1.5.0
