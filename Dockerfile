@@ -20,9 +20,13 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir davey \
-    && python -c "import davey; print('DAVEY INSTALL CHECK: OK')"
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+RUN pip install --no-cache-dir davey
+
+RUN python -c "import davey; print('DAVEY INSTALL CHECK: OK')"
 
 RUN git clone --depth 1 --branch 1.3.1 \
     https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
