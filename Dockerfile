@@ -23,7 +23,8 @@ WORKDIR /app
 # Install Python dependencies
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir davey
 
 # Install BgUtil PO-token provider
 RUN git clone --depth 1 --branch 1.3.1 \
