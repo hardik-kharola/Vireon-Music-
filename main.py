@@ -1,3 +1,4 @@
+from emojies import setup_music_emojis, get_emoji
 import asyncio
 import logging
 import os
