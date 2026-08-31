@@ -16,7 +16,6 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 import yt_dlp
-from emojies import setup_music_emojis, get_emoji
 
 
 # ============================================================
@@ -1017,7 +1016,7 @@ class MusicView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="Play", emoji=get_emoji("play"), style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="⏵  Play", style=discord.ButtonStyle.secondary, row=0)
     async def play_pause(self, interaction, button):
         if not self.p.current:
             return await interaction.response.send_message(
@@ -1057,7 +1056,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="Back", emoji=get_emoji("back"), style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="|◀  Back", style=discord.ButtonStyle.secondary, row=0)
     async def previous_btn(self, interaction, button):
         if len(self.p.history) < 2:
             return await interaction.response.send_message(
@@ -1082,7 +1081,7 @@ class MusicView(discord.ui.View):
             f"Playing **{discord.utils.escape_markdown(previous.title)}**."
         )
 
-    @discord.ui.button(label="Pause", emoji=get_emoji("pause"), style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Ⅱ  Pause", style=discord.ButtonStyle.secondary, row=0)
     async def pause_btn(self, interaction, button):
         if self.p.voice and self.p.voice.is_playing():
             pause_position(self.p)
@@ -1097,7 +1096,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="Skip", emoji=get_emoji("skip"), style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="▶|  Skip", style=discord.ButtonStyle.secondary, row=0)
     async def skip_btn(self, interaction, button):
         if self.p.voice and (self.p.voice.is_playing() or self.p.voice.is_paused()):
             self.p.generation += 1
@@ -1109,7 +1108,7 @@ class MusicView(discord.ui.View):
 
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="Loop", emoji=get_emoji("loop"), style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="↻  Loop", style=discord.ButtonStyle.secondary, row=0)
     async def loop_btn(self, interaction, button):
         self.p.loop_mode = {
             "off": "song",
@@ -1129,7 +1128,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, f"Loop mode set to **{label}**.")
 
-    @discord.ui.button(label="Down", emoji=get_emoji("volume_down"), style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="−  Down", style=discord.ButtonStyle.secondary, row=1)
     async def volume_down(self, interaction, button):
         self.p.volume = max(0.0, round(self.p.volume - 0.10, 2))
         if self.p.voice and isinstance(self.p.voice.source, discord.PCMVolumeTransformer):
@@ -1144,28 +1143,28 @@ class MusicView(discord.ui.View):
             f"Volume decreased to **{int(self.p.volume * 100)}%**."
         )
 
-    @discord.ui.button(label="Rewind", emoji=get_emoji("rewind"), style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="◀◀  Rewind", style=discord.ButtonStyle.secondary, row=1)
     async def rewind_btn(self, interaction, button):
         await self.button_success(
             interaction,
             "Rewind button executed successfully."
         )
 
-    @discord.ui.button(label="Favorite", emoji=get_emoji("favorite"), style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="♡  Favorite", style=discord.ButtonStyle.secondary, row=1)
     async def favorite_btn(self, interaction, button):
         await self.button_success(
             interaction,
             "Favorite button executed successfully."
         )
 
-    @discord.ui.button(label="Forward", emoji=get_emoji("forward"), style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="▶▶  Forward", style=discord.ButtonStyle.secondary, row=1)
     async def forward_btn(self, interaction, button):
         await self.button_success(
             interaction,
             "Forward button executed successfully."
         )
 
-    @discord.ui.button(label="Up", emoji=get_emoji("volume_up"), style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="+  Up", style=discord.ButtonStyle.secondary, row=1)
     async def volume_up(self, interaction, button):
         self.p.volume = min(1.0, round(self.p.volume + 0.10, 2))
         if self.p.voice and isinstance(self.p.voice.source, discord.PCMVolumeTransformer):
@@ -1180,7 +1179,7 @@ class MusicView(discord.ui.View):
             f"Volume increased to **{int(self.p.volume * 100)}%**."
         )
 
-    @discord.ui.button(label="Voice", emoji=get_emoji("voice"), style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="♩  Voice", style=discord.ButtonStyle.secondary, row=2)
     async def voice_btn(self, interaction, button):
         channel = self.p.voice.channel if self.p.voice and self.p.voice.is_connected() else None
         if channel:
@@ -1189,7 +1188,7 @@ class MusicView(discord.ui.View):
             message = "The bot is not connected to a voice channel."
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="Shuffle", emoji=get_emoji("shuffle"), style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="⇄  Shuffle", style=discord.ButtonStyle.secondary, row=2)
     async def shuffle_btn(self, interaction, button):
         items = list(self.p.queue)
         if len(items) < 2:
@@ -1205,7 +1204,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, "Queue shuffled successfully.")
 
-    @discord.ui.button(label="Stop", emoji=get_emoji("stop"), style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="×  Stop", style=discord.ButtonStyle.secondary, row=2)
     async def stop_btn(self, interaction, button):
         self.p.queue.clear()
         self.p.loop_mode = "off"
@@ -1240,7 +1239,7 @@ class MusicView(discord.ui.View):
             except discord.HTTPException:
                 pass
 
-    @discord.ui.button(label="Clear", emoji=get_emoji("clear"), style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="×  Clear", style=discord.ButtonStyle.secondary, row=2)
     async def clear_btn(self, interaction, button):
         count = len(self.p.queue)
         self.p.queue.clear()
@@ -1249,7 +1248,7 @@ class MusicView(discord.ui.View):
             f"Cleared **{count}** queued track(s) successfully."
         )
 
-    @discord.ui.button(label="Playlist", emoji=get_emoji("playlist"), style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="≡  Playlist", style=discord.ButtonStyle.secondary, row=2)
     async def queue_btn(self, interaction, button):
         await interaction.response.send_message(
             embed=queue_embed(self.p),
@@ -1355,20 +1354,6 @@ async def on_ready():
             "Command sync failed: %s",
             exc
         )
-
-
-    # Load/reuse the custom PNG-based music emojis before player buttons
-    # are displayed. Existing emojis are reused to prevent duplicates.
-    for guild in bot.guilds:
-        try:
-            await setup_music_emojis(guild)
-            logging.info("[OK] Music emojis ready in %s", guild.name)
-        except Exception as exc:
-            logging.error(
-                "Music emoji setup failed in %s: %s",
-                guild.name,
-                exc
-            )
 
     await bot.change_presence(
         activity=discord.Activity(
