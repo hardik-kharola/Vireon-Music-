@@ -524,6 +524,20 @@ def build_player_embed(
 # PLAYER MESSAGE / PROGRESS
 # ============================================================
 
+async def delete_player_message(p: GuildPlayer):
+    """Delete the active Now Playing panel so every track gets a fresh one."""
+    message = p.player_message
+    p.player_message = None
+
+    if message is None:
+        return
+
+    try:
+        await message.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+
+
 async def update_player_message(
     p: GuildPlayer
 ):
@@ -715,6 +729,10 @@ async def start_next(
             or p.voice.is_paused()
         ):
             return
+
+        # The previous song panel must disappear before the next song begins.
+        # update_player_message() will then create a completely new panel.
+        await delete_player_message(p)
 
         if not p.queue:
 
@@ -956,7 +974,8 @@ class MusicView(discord.ui.View):
         if self.p.current:
             self.p.queue.appendleft(self.p.current)
         self.p.queue.appendleft(previous)
-        self.p.generation += 1
+        # Let voice.stop() invoke the normal after-callback so the
+        # previous track is replaced by a fresh Now Playing panel.
         self.p.suppress_after = False
 
         if self.p.voice and (self.p.voice.is_playing() or self.p.voice.is_paused()):
@@ -987,7 +1006,8 @@ class MusicView(discord.ui.View):
     @discord.ui.button(label="▶|  Skip", style=discord.ButtonStyle.secondary, row=0)
     async def skip_btn(self, interaction, button):
         if self.p.voice and (self.p.voice.is_playing() or self.p.voice.is_paused()):
-            self.p.generation += 1
+            # Do not invalidate the after-callback. stop() must trigger
+            # start_next(), which deletes the old panel and sends a new one.
             self.p.suppress_after = False
             self.p.voice.stop()
             message = "Skipped the current track successfully."
