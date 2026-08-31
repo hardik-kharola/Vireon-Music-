@@ -24,10 +24,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 RUN pip install --no-cache-dir "bgutil-ytdlp-pot-provider==1.3.1"
 
-# Required by the bgutil yt-dlp provider plugin
-RUN pip install --no-cache-dir "bgutil-ytdlp-pot-provider==1.3.1"
-
-# Verify the plugin is installed and visible to Python
 RUN python -c "import bgutil_ytdlp_pot_provider; print('BGUTIL PYTHON PLUGIN: OK')"
 
 RUN git clone --depth 1 --branch 1.3.1 \
