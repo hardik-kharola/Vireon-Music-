@@ -20,13 +20,13 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-COPY requirements.txt .
-
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install --no-cache-dir davey
+# Required by the bgutil yt-dlp provider plugin
+RUN pip install --no-cache-dir "bgutil-ytdlp-pot-provider==1.3.1"
 
-RUN python -c "import davey; print('DAVEY INSTALL CHECK: OK')"
+# Verify the plugin is installed and visible to Python
+RUN python -c "import bgutil_ytdlp_pot_provider; print('BGUTIL PYTHON PLUGIN: OK')"
 
 RUN git clone --depth 1 --branch 1.3.1 \
     https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
@@ -38,4 +38,4 @@ RUN cd /opt/bgutil-ytdlp-pot-provider/server \
 
 COPY . .
 
-CMD ["sh", "-c", "node /opt/bgutil-ytdlp-pot-provider/server/build/main.js --port 4416 & python main.py"]
+CMD ["sh", "-c", "node /opt/bgutil-ytdlp-pot-provider/server/build/main.js --port 4416 & exec python main.py"]
