@@ -4,6 +4,9 @@ import os
 import random
 import shutil
 import time
+import json
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional
@@ -145,6 +148,7 @@ class Track:
     thumbnail: Optional[str] = None
     stream_url: Optional[str] = None
     author: str = "Unknown Artist"
+    source: str = "YouTube"
 
 
 class GuildPlayer:
@@ -362,61 +366,147 @@ async def ensure_voice_ctx(
 # YOUTUBE FUNCTIONS
 # ============================================================
 
+def _spotify_metadata(url: str) -> tuple[str, str, Optional[str]]:
+    """Get lightweight Spotify metadata without using Spotify audio streams."""
+    endpoint = (
+        "https://open.spotify.com/oembed?url="
+        + quote(url, safe="")
+    )
+    request = Request(
+        endpoint,
+        headers={"User-Agent": "Vireon-Music/1.0"}
+    )
+    with urlopen(request, timeout=8) as response:
+        data = json.loads(response.read().decode("utf-8"))
+
+    title = (data.get("title") or "").strip()
+    author = (data.get("author_name") or "").strip()
+    thumbnail = data.get("thumbnail_url")
+    if not title:
+        raise ValueError("Spotify track metadata could not be read.")
+    return title, author, thumbnail
+
+
+def _is_spotify_url(query: str) -> bool:
+    q = query.lower().strip()
+    return "open.spotify.com/" in q or "spotify.com/" in q
+
+
+def _extract_first(info):
+    if info and "entries" in info:
+        return next((entry for entry in info["entries"] if entry), None)
+    return info
+
+
+def _make_track(info, requester: discord.Member, fallback_url: str, source: str) -> Track:
+    info = _extract_first(info)
+    if not info:
+        raise ValueError("No playable result was found.")
+
+    webpage_url = (
+        info.get("webpage_url")
+        or info.get("original_url")
+        or fallback_url
+    )
+
+    return Track(
+        title=info.get("title", "Unknown title"),
+        webpage_url=webpage_url,
+        duration=info.get("duration") or 0,
+        requester=requester,
+        thumbnail=info.get("thumbnail"),
+        stream_url=info.get("url"),
+        author=(
+            info.get("artist")
+            or info.get("creator")
+            or info.get("uploader")
+            or info.get("channel")
+            or "Unknown Artist"
+        ),
+        source=source
+    )
+
+
 def resolve_track(
     query: str,
     requester: discord.Member
 ) -> Track:
+    """Resolve YouTube plus yt-dlp-supported sources into one Track object.
+
+    Supported directly by yt-dlp include YouTube, SoundCloud, Bandcamp,
+    Mixcloud, Vimeo, Dailymotion, direct media URLs, and other supported
+    extractors. Spotify is handled as metadata and resolved to a YouTube
+    audio result because Spotify does not expose a downloadable Discord
+    audio stream through its public API.
+    """
+    query = query.strip()
+
+    if not query:
+        raise ValueError("Please provide a song name or supported URL.")
+
+    # Spotify: read public metadata, then resolve the matching audio on
+    # YouTube. We keep the Spotify URL as the user-facing source URL.
+    if _is_spotify_url(query):
+        try:
+            title, artist, spotify_thumbnail = _spotify_metadata(query)
+            search = f"{title} {artist}".strip()
+
+            with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+                info = ydl.extract_info(
+                    f"ytsearch1:{search}",
+                    download=False
+                )
+
+            track = _make_track(
+                info,
+                requester,
+                query,
+                "Spotify → YouTube"
+            )
+            if spotify_thumbnail:
+                track.thumbnail = spotify_thumbnail
+            return track
+        except Exception as exc:
+            raise ValueError(
+                f"Could not resolve Spotify track: {str(exc)[:500]}"
+            ) from exc
+
+    # URLs are passed directly to yt-dlp. This enables all installed
+    # yt-dlp extractors without changing the Discord playback layer.
+    is_url = query.lower().startswith((
+        "http://", "https://"
+    ))
 
     with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-
-        info = ydl.extract_info(
-            query,
-            download=False
-        )
-
-        if info and "entries" in info:
-            info = next(
-                (
-                    entry
-                    for entry in info["entries"]
-                    if entry
-                ),
-                None
+        if is_url:
+            info = ydl.extract_info(
+                query,
+                download=False
+            )
+        else:
+            info = ydl.extract_info(
+                f"ytsearch1:{query}",
+                download=False
             )
 
-        if not info:
-            raise ValueError(
-                "No playable result was found."
-            )
+    track = _make_track(
+        info,
+        requester,
+        query,
+        "URL source" if is_url else "YouTube"
+    )
 
-        url = (
-            info.get("webpage_url")
-            or info.get("original_url")
-            or query
+    # Prefer the actual extractor name when yt-dlp provides one.
+    raw_info = _extract_first(info)
+    if raw_info:
+        extractor = (
+            raw_info.get("extractor_key")
+            or raw_info.get("extractor")
         )
+        if extractor:
+            track.source = str(extractor)
 
-        return Track(
-            title=info.get(
-                "title",
-                "Unknown title"
-            ),
-            webpage_url=url,
-            duration=info.get(
-                "duration"
-            ) or 0,
-            requester=requester,
-            thumbnail=info.get(
-                "thumbnail"
-            ),
-            stream_url=info.get("url"),
-            author=(
-                info.get("artist")
-                or info.get("creator")
-                or info.get("uploader")
-                or info.get("channel")
-                or "Unknown Artist"
-            )
-        )
+    return track
 
 
 def refresh_stream(track: Track) -> Track:
@@ -503,7 +593,8 @@ def build_player_embed(
     embed.description = (
         f"### [{discord.utils.escape_markdown(track.title)}]"
         f"({track.webpage_url})\n"
-        f"*{discord.utils.escape_markdown(track.author)}*\n\n"
+        f"*{discord.utils.escape_markdown(track.author)}*\n"
+        f"`{discord.utils.escape_markdown(track.source)}`\n\n"
         f"`{fmt_duration(int(position))}` "
         f"{bar} "
         f"`{fmt_duration(track.duration)}`\n\n"
@@ -523,6 +614,20 @@ def build_player_embed(
 # ============================================================
 # PLAYER MESSAGE / PROGRESS
 # ============================================================
+
+async def delete_player_message(p: GuildPlayer):
+    """Delete the active Now Playing panel so every track gets a fresh one."""
+    message = p.player_message
+    p.player_message = None
+
+    if message is None:
+        return
+
+    try:
+        await message.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+
 
 async def update_player_message(
     p: GuildPlayer
@@ -715,6 +820,10 @@ async def start_next(
             or p.voice.is_paused()
         ):
             return
+
+        # The previous song panel must disappear before the next song begins.
+        # update_player_message() will then create a completely new panel.
+        await delete_player_message(p)
 
         if not p.queue:
 
@@ -2466,6 +2575,10 @@ async def prefix_help(ctx):
         "**No-prefix:** enabled for users in "
         "`NO_PREFIX_USERS`\n\n"
 
+        "**Sources**\n"
+        "YouTube • SoundCloud • Bandcamp • Mixcloud\n"
+        "Spotify links → metadata + matched audio\n"
+        "Direct audio URLs are also supported.\n\n"
         "**Music Commands**\n"
         "`-play <song>`\n"
         "`-pause` • `-resume` • `-skip`\n"
