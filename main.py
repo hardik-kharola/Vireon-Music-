@@ -1,4 +1,3 @@
-from emojies import setup_music_emojis, get_emoji
 import asyncio
 import logging
 import os
@@ -17,6 +16,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 import yt_dlp
+from emojies import setup_music_emojis, get_emoji
 
 
 # ============================================================
@@ -402,23 +402,6 @@ def _extract_first(info):
     return info
 
 
-def _youtube_oembed_metadata(url: str):
-    """Best-effort public YouTube metadata used for source fallback."""
-    endpoint = (
-        "https://www.youtube.com/oembed?url="
-        + quote(url, safe="")
-        + "&format=json"
-    )
-    request = Request(endpoint, headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen(request, timeout=6) as response:
-        data = json.loads(response.read().decode("utf-8"))
-    return (
-        (data.get("title") or "").strip(),
-        (data.get("author_name") or "").strip(),
-        data.get("thumbnail_url"),
-    )
-
-
 def _make_track(info, requester: discord.Member, fallback_url: str, source: str) -> Track:
     info = _extract_first(info)
     if not info:
@@ -448,19 +431,77 @@ def _make_track(info, requester: discord.Member, fallback_url: str, source: str)
     )
 
 
-def _resolve_with_ytdlp(
-    target: str,
-    requester: discord.Member,
-    source: str,
-    options=None
+def resolve_track(
+    query: str,
+    requester: discord.Member
 ) -> Track:
-    """Resolve one target with yt-dlp."""
-    with yt_dlp.YoutubeDL(options or YDL_OPTIONS) as ydl:
-        info = ydl.extract_info(target, download=False)
+    """Resolve YouTube plus yt-dlp-supported sources into one Track object.
 
-    track = _make_track(info, requester, target, source)
+    Supported directly by yt-dlp include YouTube, SoundCloud, Bandcamp,
+    Mixcloud, Vimeo, Dailymotion, direct media URLs, and other supported
+    extractors. Spotify is handled as metadata and resolved to a YouTube
+    audio result because Spotify does not expose a downloadable Discord
+    audio stream through its public API.
+    """
+    query = query.strip()
+
+    if not query:
+        raise ValueError("Please provide a song name or supported URL.")
+
+    # Spotify: read public metadata, then resolve the matching audio on
+    # YouTube. We keep the Spotify URL as the user-facing source URL.
+    if _is_spotify_url(query):
+        try:
+            title, artist, spotify_thumbnail = _spotify_metadata(query)
+            search = f"{title} {artist}".strip()
+
+            with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+                info = ydl.extract_info(
+                    f"ytsearch1:{search}",
+                    download=False
+                )
+
+            track = _make_track(
+                info,
+                requester,
+                query,
+                "Spotify → YouTube"
+            )
+            if spotify_thumbnail:
+                track.thumbnail = spotify_thumbnail
+            return track
+        except Exception as exc:
+            raise ValueError(
+                f"Could not resolve Spotify track: {str(exc)[:500]}"
+            ) from exc
+
+    # URLs are passed directly to yt-dlp. This enables all installed
+    # yt-dlp extractors without changing the Discord playback layer.
+    is_url = query.lower().startswith((
+        "http://", "https://"
+    ))
+
+    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+        if is_url:
+            info = ydl.extract_info(
+                query,
+                download=False
+            )
+        else:
+            info = ydl.extract_info(
+                f"ytsearch1:{query}",
+                download=False
+            )
+
+    track = _make_track(
+        info,
+        requester,
+        query,
+        "URL source" if is_url else "YouTube"
+    )
+
+    # Prefer the actual extractor name when yt-dlp provides one.
     raw_info = _extract_first(info)
-
     if raw_info:
         extractor = (
             raw_info.get("extractor_key")
@@ -472,171 +513,14 @@ def _resolve_with_ytdlp(
     return track
 
 
-def _source_searches(query: str):
-    """Ordered fallback sources for normal text searches."""
-    return [
-        ("YouTube", f"ytsearch1:{query}"),
-        ("SoundCloud", f"scsearch1:{query}"),
-        ("Bandcamp", f"bcsearch1:{query}"),
-        ("Mixcloud", f"mcsearch1:{query}"),
-    ]
-
-
-def _resolve_text_with_fallback(
-    query: str,
-    requester: discord.Member
-) -> Track:
-    errors = []
-
-    for source, target in _source_searches(query):
-        try:
-            track = _resolve_with_ytdlp(
-                target,
-                requester,
-                source
-            )
-            logging.info(
-                "[SOURCE] %s selected for %s",
-                track.source,
-                query
-            )
-            return track
-        except Exception as exc:
-            logging.warning(
-                "[SOURCE FAILED] %s: %s",
-                source,
-                str(exc)[:250]
-            )
-            errors.append(
-                f"{source}: {str(exc)[:180]}"
-            )
-
-    raise ValueError(
-        "All playback sources failed.\n"
-        + "\n".join(
-            f"• {item}" for item in errors
-        )
-    )
-
-
-def _resolve_url_with_fallback(
-    url: str,
-    requester: discord.Member
-) -> Track:
-    """Try a supplied URL first; YouTube URLs may fall back to alternatives."""
-    try:
-        return _resolve_with_ytdlp(
-            url,
-            requester,
-            "URL source"
-        )
-    except Exception as primary_exc:
-        is_youtube = (
-            "youtube.com/" in url.lower()
-            or "youtu.be/" in url.lower()
-        )
-
-        # Do not replace arbitrary direct URLs with an unrelated song.
-        if not is_youtube:
-            raise primary_exc
-
-        fallback_query = ""
-
-        try:
-            title, artist, _ = _youtube_oembed_metadata(url)
-            fallback_query = f"{title} {artist}".strip()
-        except Exception as exc:
-            logging.warning(
-                "[YouTube metadata fallback failed] %s",
-                exc
-            )
-
-        if not fallback_query:
-            raise primary_exc
-
-        try:
-            return _resolve_text_with_fallback(
-                fallback_query,
-                requester
-            )
-        except Exception as fallback_exc:
-            raise ValueError(
-                "YouTube could not be played and no alternative "
-                "source could be found.\n"
-                f"YouTube: {str(primary_exc)[:350]}\n"
-                f"Fallback: {str(fallback_exc)[:500]}"
-            ) from fallback_exc
-
-
-def resolve_track(
-    query: str,
-    requester: discord.Member
-) -> Track:
-    """Resolve with automatic source fallback.
-
-    Text searches:
-        YouTube -> SoundCloud -> Bandcamp -> Mixcloud
-
-    Spotify:
-        Spotify metadata -> same audio-source fallback order.
-
-    YouTube URLs:
-        Try the requested URL first; if YouTube rejects it, read public
-        title/artist metadata and search the other supported sources.
-    """
-    query = query.strip()
-
-    if not query:
-        raise ValueError(
-            "Please provide a song name or supported URL."
-        )
-
-    if _is_spotify_url(query):
-        try:
-            title, artist, spotify_thumbnail = _spotify_metadata(query)
-
-            track = _resolve_text_with_fallback(
-                f"{title} {artist}".strip(),
-                requester
-            )
-
-            if spotify_thumbnail:
-                track.thumbnail = spotify_thumbnail
-
-            track.source = (
-                f"Spotify → {track.source}"
-            )
-
-            return track
-
-        except Exception as exc:
-            raise ValueError(
-                f"Could not resolve Spotify track: {str(exc)[:700]}"
-            ) from exc
-
-    if query.lower().startswith((
-        "http://",
-        "https://"
-    )):
-        return _resolve_url_with_fallback(
-            query,
-            requester
-        )
-
-    return _resolve_text_with_fallback(
-        query,
-        requester
-    )
-
-
 def refresh_stream(track: Track) -> Track:
-    """Refresh a stream; fall back when a previously resolved YouTube track fails."""
-    try:
-        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-            info = ydl.extract_info(
-                track.webpage_url,
-                download=False
-            )
+
+    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+
+        info = ydl.extract_info(
+            track.webpage_url,
+            download=False
+        )
 
         if info and "entries" in info:
             info = next(
@@ -654,65 +538,21 @@ def refresh_stream(track: Track) -> Track:
             )
 
         track.stream_url = info.get("url")
+
         track.title = info.get(
             "title",
             track.title
         )
+
         track.duration = info.get(
             "duration"
         ) or track.duration
+
         track.thumbnail = info.get(
             "thumbnail"
         ) or track.thumbnail
 
         return track
-
-    except Exception as primary_exc:
-        source_name = (track.source or "").lower()
-        is_youtube = (
-            "youtube" in source_name
-            or "youtube.com/" in track.webpage_url.lower()
-            or "youtu.be/" in track.webpage_url.lower()
-        )
-
-        if not is_youtube:
-            raise
-
-        fallback_query = (
-            f"{track.title} {track.author}"
-        ).strip()
-
-        try:
-            fallback = _resolve_text_with_fallback(
-                fallback_query,
-                track.requester
-            )
-
-            track.title = fallback.title
-            track.webpage_url = fallback.webpage_url
-            track.duration = fallback.duration
-            track.thumbnail = (
-                fallback.thumbnail
-                or track.thumbnail
-            )
-            track.stream_url = fallback.stream_url
-            track.author = fallback.author
-            track.source = fallback.source
-
-            logging.info(
-                "[PLAYBACK FALLBACK] %s -> %s",
-                track.title,
-                track.source
-            )
-
-            return track
-
-        except Exception as fallback_exc:
-            raise ValueError(
-                "Playback source failed and no fallback source was playable. "
-                f"Primary: {str(primary_exc)[:300]} | "
-                f"Fallback: {str(fallback_exc)[:400]}"
-            ) from fallback_exc
 
 
 # ============================================================
@@ -1177,7 +1017,7 @@ class MusicView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="⏵  Play", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Play", emoji=get_emoji("play"), style=discord.ButtonStyle.secondary, row=0)
     async def play_pause(self, interaction, button):
         if not self.p.current:
             return await interaction.response.send_message(
@@ -1217,7 +1057,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="|◀  Back", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Back", emoji=get_emoji("back"), style=discord.ButtonStyle.secondary, row=0)
     async def previous_btn(self, interaction, button):
         if len(self.p.history) < 2:
             return await interaction.response.send_message(
@@ -1242,7 +1082,7 @@ class MusicView(discord.ui.View):
             f"Playing **{discord.utils.escape_markdown(previous.title)}**."
         )
 
-    @discord.ui.button(label="Ⅱ  Pause", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Pause", emoji=get_emoji("pause"), style=discord.ButtonStyle.secondary, row=0)
     async def pause_btn(self, interaction, button):
         if self.p.voice and self.p.voice.is_playing():
             pause_position(self.p)
@@ -1257,7 +1097,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="▶|  Skip", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Skip", emoji=get_emoji("skip"), style=discord.ButtonStyle.secondary, row=0)
     async def skip_btn(self, interaction, button):
         if self.p.voice and (self.p.voice.is_playing() or self.p.voice.is_paused()):
             self.p.generation += 1
@@ -1269,7 +1109,7 @@ class MusicView(discord.ui.View):
 
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="↻  Loop", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Loop", emoji=get_emoji("loop"), style=discord.ButtonStyle.secondary, row=0)
     async def loop_btn(self, interaction, button):
         self.p.loop_mode = {
             "off": "song",
@@ -1289,7 +1129,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, f"Loop mode set to **{label}**.")
 
-    @discord.ui.button(label="−  Down", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Down", emoji=get_emoji("volume_down"), style=discord.ButtonStyle.secondary, row=1)
     async def volume_down(self, interaction, button):
         self.p.volume = max(0.0, round(self.p.volume - 0.10, 2))
         if self.p.voice and isinstance(self.p.voice.source, discord.PCMVolumeTransformer):
@@ -1304,28 +1144,28 @@ class MusicView(discord.ui.View):
             f"Volume decreased to **{int(self.p.volume * 100)}%**."
         )
 
-    @discord.ui.button(label="◀◀  Rewind", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Rewind", emoji=get_emoji("rewind"), style=discord.ButtonStyle.secondary, row=1)
     async def rewind_btn(self, interaction, button):
         await self.button_success(
             interaction,
             "Rewind button executed successfully."
         )
 
-    @discord.ui.button(label="♡  Favorite", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Favorite", emoji=get_emoji("favorite"), style=discord.ButtonStyle.secondary, row=1)
     async def favorite_btn(self, interaction, button):
         await self.button_success(
             interaction,
             "Favorite button executed successfully."
         )
 
-    @discord.ui.button(label="▶▶  Forward", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Forward", emoji=get_emoji("forward"), style=discord.ButtonStyle.secondary, row=1)
     async def forward_btn(self, interaction, button):
         await self.button_success(
             interaction,
             "Forward button executed successfully."
         )
 
-    @discord.ui.button(label="+  Up", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Up", emoji=get_emoji("volume_up"), style=discord.ButtonStyle.secondary, row=1)
     async def volume_up(self, interaction, button):
         self.p.volume = min(1.0, round(self.p.volume + 0.10, 2))
         if self.p.voice and isinstance(self.p.voice.source, discord.PCMVolumeTransformer):
@@ -1340,7 +1180,7 @@ class MusicView(discord.ui.View):
             f"Volume increased to **{int(self.p.volume * 100)}%**."
         )
 
-    @discord.ui.button(label="♩  Voice", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Voice", emoji=get_emoji("voice"), style=discord.ButtonStyle.secondary, row=2)
     async def voice_btn(self, interaction, button):
         channel = self.p.voice.channel if self.p.voice and self.p.voice.is_connected() else None
         if channel:
@@ -1349,7 +1189,7 @@ class MusicView(discord.ui.View):
             message = "The bot is not connected to a voice channel."
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="⇄  Shuffle", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Shuffle", emoji=get_emoji("shuffle"), style=discord.ButtonStyle.secondary, row=2)
     async def shuffle_btn(self, interaction, button):
         items = list(self.p.queue)
         if len(items) < 2:
@@ -1365,7 +1205,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, "Queue shuffled successfully.")
 
-    @discord.ui.button(label="×  Stop", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Stop", emoji=get_emoji("stop"), style=discord.ButtonStyle.secondary, row=2)
     async def stop_btn(self, interaction, button):
         self.p.queue.clear()
         self.p.loop_mode = "off"
@@ -1400,7 +1240,7 @@ class MusicView(discord.ui.View):
             except discord.HTTPException:
                 pass
 
-    @discord.ui.button(label="×  Clear", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Clear", emoji=get_emoji("clear"), style=discord.ButtonStyle.secondary, row=2)
     async def clear_btn(self, interaction, button):
         count = len(self.p.queue)
         self.p.queue.clear()
@@ -1409,7 +1249,7 @@ class MusicView(discord.ui.View):
             f"Cleared **{count}** queued track(s) successfully."
         )
 
-    @discord.ui.button(label="≡  Playlist", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Playlist", emoji=get_emoji("playlist"), style=discord.ButtonStyle.secondary, row=2)
     async def queue_btn(self, interaction, button):
         await interaction.response.send_message(
             embed=queue_embed(self.p),
@@ -1515,6 +1355,20 @@ async def on_ready():
             "Command sync failed: %s",
             exc
         )
+
+
+    # Load/reuse the custom PNG-based music emojis before player buttons
+    # are displayed. Existing emojis are reused to prevent duplicates.
+    for guild in bot.guilds:
+        try:
+            await setup_music_emojis(guild)
+            logging.info("[OK] Music emojis ready in %s", guild.name)
+        except Exception as exc:
+            logging.error(
+                "Music emoji setup failed in %s: %s",
+                guild.name,
+                exc
+            )
 
     await bot.change_presence(
         activity=discord.Activity(
