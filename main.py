@@ -88,17 +88,42 @@ bot = commands.Bot(
 # YOUTUBE / FFMPEG
 # ============================================================
 
-# Optional Railway variable containing the complete Netscape-format cookies.txt content.
+# Railway can provide the exported Netscape-format cookies as
+# YOUTUBE_COOKIES. The value must contain the COMPLETE cookie file.
+# Keep this variable under Railway's 32 KB variable limit by exporting
+# only the YouTube cookies (not every website cookie).
 YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "").strip()
 COOKIE_FILE = "/tmp/youtube_cookies.txt"
 
 if YOUTUBE_COOKIES:
     try:
+        # Accept both raw Netscape cookies and a base64-encoded copy.
+        import base64
+
+        cookie_text = YOUTUBE_COOKIES
+        if not cookie_text.startswith("#"):
+            try:
+                decoded = base64.b64decode(
+                    cookie_text,
+                    validate=True
+                ).decode("utf-8")
+                if "youtube.com" in decoded:
+                    cookie_text = decoded
+            except Exception:
+                pass
+
         with open(COOKIE_FILE, "w", encoding="utf-8") as cookie_fp:
-            cookie_fp.write(YOUTUBE_COOKIES)
-        logging.info("[OK] YouTube cookies loaded.")
+            cookie_fp.write(cookie_text)
+
+        logging.info(
+            "[OK] YouTube cookies loaded (%d bytes).",
+            len(cookie_text.encode("utf-8"))
+        )
     except Exception as exc:
-        logging.error("[ERROR] Could not create YouTube cookie file: %s", exc)
+        logging.error(
+            "[ERROR] Could not create YouTube cookie file: %s",
+            exc
+        )
 
 YDL_OPTIONS = {
     "format": "bestaudio/best",
@@ -478,7 +503,7 @@ def build_player_embed(
 
     track = p.current
     position = current_position(p)
-    bar = progress_bar(position, track.duration)
+    bar = progress_bar(position, track.duration, width=28)
 
     status = "Paused" if p.voice and p.voice.is_paused() else "Playing"
 
@@ -490,31 +515,70 @@ def build_player_embed(
 
     autoplay_name = "On" if p.autoplay else "Off"
 
-    embed = base_embed(
-        "NOW PLAYING",
-        color=INFO,
-        track=track
+    embed = discord.Embed(
+        title="VIREON MUSIC",
+        description="## NOW PLAYING",
+        color=INFO
     )
 
-    embed.set_author(
-        name="VIREON MUSIC"
+    if track.thumbnail:
+        embed.set_thumbnail(url=track.thumbnail)
+
+    embed.add_field(
+        name=f"[{discord.utils.escape_markdown(track.title)}]({track.webpage_url})",
+        value=(
+            f"**{discord.utils.escape_markdown(track.author)}**\n"
+            f"`{fmt_duration(int(position))}` "
+            f"{bar} "
+            f"`{fmt_duration(track.duration)}`"
+        ),
+        inline=False
     )
 
-    embed.description = (
-        f"### [{discord.utils.escape_markdown(track.title)}]"
-        f"({track.webpage_url})\n"
-        f"*{discord.utils.escape_markdown(track.author)}*\n\n"
-        f"`{fmt_duration(int(position))}` "
-        f"{bar} "
-        f"`{fmt_duration(track.duration)}`\n\n"
-        f"**Status:** `{status}`\n"
-        f"**Requested by:** {track.requester.mention}\n"
-        f"**Author:** {discord.utils.escape_markdown(track.author)}\n"
-        f"**Duration:** `{fmt_duration(track.duration)}`\n\n"
-        f"**Queue:** `{len(p.queue)}`   "
-        f"**Volume:** `{int(p.volume * 100)}%`   "
-        f"**Loop:** `{loop_name}`   "
-        f"**Autoplay:** `{autoplay_name}`"
+    embed.add_field(
+        name="🎚  Status",
+        value=f"**{status}**",
+        inline=True
+    )
+    embed.add_field(
+        name="👤  Requested by",
+        value=track.requester.mention,
+        inline=True
+    )
+    embed.add_field(
+        name="🎤  Author",
+        value=discord.utils.escape_markdown(track.author),
+        inline=True
+    )
+    embed.add_field(
+        name="◷  Duration",
+        value=fmt_duration(track.duration),
+        inline=True
+    )
+
+    embed.add_field(
+        name="Queue",
+        value=f"`{len(p.queue)}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🔊 Volume",
+        value=f"`{int(p.volume * 100)}%`",
+        inline=True
+    )
+    embed.add_field(
+        name="↻ Loop",
+        value=f"`{loop_name}`",
+        inline=True
+    )
+    embed.add_field(
+        name="↻ Autoplay",
+        value=f"`{autoplay_name}`",
+        inline=True
+    )
+
+    embed.set_footer(
+        text="✦  Crafted by Escobar | Hardik  ✦"
     )
 
     return embed
@@ -904,7 +968,7 @@ class MusicView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="⏵  Play", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="▶  Play", style=discord.ButtonStyle.primary, row=0)
     async def play_pause(self, interaction, button):
         if not self.p.current:
             return await interaction.response.send_message(
@@ -944,7 +1008,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="|◀  Back", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="|◀  Back", style=discord.ButtonStyle.primary, row=0)
     async def previous_btn(self, interaction, button):
         if len(self.p.history) < 2:
             return await interaction.response.send_message(
@@ -969,7 +1033,7 @@ class MusicView(discord.ui.View):
             f"Playing **{discord.utils.escape_markdown(previous.title)}**."
         )
 
-    @discord.ui.button(label="Ⅱ  Pause", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Ⅱ  Pause", style=discord.ButtonStyle.primary, row=0)
     async def pause_btn(self, interaction, button):
         if self.p.voice and self.p.voice.is_playing():
             pause_position(self.p)
@@ -984,7 +1048,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="▶|  Skip", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="▶|  Skip", style=discord.ButtonStyle.primary, row=0)
     async def skip_btn(self, interaction, button):
         if self.p.voice and (self.p.voice.is_playing() or self.p.voice.is_paused()):
             self.p.generation += 1
@@ -996,7 +1060,7 @@ class MusicView(discord.ui.View):
 
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="↻  Loop", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="↻  Loop", style=discord.ButtonStyle.primary, row=0)
     async def loop_btn(self, interaction, button):
         self.p.loop_mode = {
             "off": "song",
@@ -1016,7 +1080,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, f"Loop mode set to **{label}**.")
 
-    @discord.ui.button(label="−  Down", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="◀  Down", style=discord.ButtonStyle.secondary, row=1)
     async def volume_down(self, interaction, button):
         self.p.volume = max(0.0, round(self.p.volume - 0.10, 2))
         if self.p.voice and isinstance(self.p.voice.source, discord.PCMVolumeTransformer):
@@ -1052,7 +1116,7 @@ class MusicView(discord.ui.View):
             "Forward button executed successfully."
         )
 
-    @discord.ui.button(label="+  Up", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="🔊  Up", style=discord.ButtonStyle.secondary, row=1)
     async def volume_up(self, interaction, button):
         self.p.volume = min(1.0, round(self.p.volume + 0.10, 2))
         if self.p.voice and isinstance(self.p.voice.source, discord.PCMVolumeTransformer):
@@ -1076,7 +1140,7 @@ class MusicView(discord.ui.View):
             message = "The bot is not connected to a voice channel."
         await self.button_success(interaction, message)
 
-    @discord.ui.button(label="⇄  Shuffle", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="⇄  Shuffle", style=discord.ButtonStyle.primary, row=2)
     async def shuffle_btn(self, interaction, button):
         items = list(self.p.queue)
         if len(items) < 2:
@@ -1092,7 +1156,7 @@ class MusicView(discord.ui.View):
         )
         await self.button_success(interaction, "Queue shuffled successfully.")
 
-    @discord.ui.button(label="×  Stop", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="■  Stop", style=discord.ButtonStyle.danger, row=2)
     async def stop_btn(self, interaction, button):
         self.p.queue.clear()
         self.p.loop_mode = "off"
@@ -1127,7 +1191,7 @@ class MusicView(discord.ui.View):
             except discord.HTTPException:
                 pass
 
-    @discord.ui.button(label="×  Clear", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="×  Clear", style=discord.ButtonStyle.danger, row=2)
     async def clear_btn(self, interaction, button):
         count = len(self.p.queue)
         self.p.queue.clear()
@@ -1136,7 +1200,7 @@ class MusicView(discord.ui.View):
             f"Cleared **{count}** queued track(s) successfully."
         )
 
-    @discord.ui.button(label="≡  Playlist", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="☷  Playlist", style=discord.ButtonStyle.primary, row=2)
     async def queue_btn(self, interaction, button):
         await interaction.response.send_message(
             embed=queue_embed(self.p),
