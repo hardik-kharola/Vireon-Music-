@@ -22,6 +22,8 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+RUN pip install --no-cache-dir "bgutil-ytdlp-pot-provider==1.3.1"
+
 # Required by the bgutil yt-dlp provider plugin
 RUN pip install --no-cache-dir "bgutil-ytdlp-pot-provider==1.3.1"
 
