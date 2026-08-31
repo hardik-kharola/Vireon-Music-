@@ -91,15 +91,18 @@ bot = commands.Bot(
 # YOUTUBE / FFMPEG
 # ============================================================
 
-# Optional Railway variable containing the complete Netscape-format cookies.txt content.
+# YouTube cookies are OPTIONAL.
+# Set USE_YOUTUBE_COOKIES=true only when YOUTUBE_COOKIES contains
+# a current, valid Netscape-format cookies.txt.
 YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "").strip()
+USE_YOUTUBE_COOKIES = os.getenv("USE_YOUTUBE_COOKIES", "false").strip().lower() in {"1", "true", "yes", "on"}
 COOKIE_FILE = "/tmp/youtube_cookies.txt"
 
-if YOUTUBE_COOKIES:
+if USE_YOUTUBE_COOKIES and YOUTUBE_COOKIES:
     try:
         with open(COOKIE_FILE, "w", encoding="utf-8") as cookie_fp:
             cookie_fp.write(YOUTUBE_COOKIES)
-        logging.info("[OK] YouTube cookies loaded.")
+        logging.info("[OK] YouTube cookies enabled and loaded.")
     except Exception as exc:
         logging.error("[ERROR] Could not create YouTube cookie file: %s", exc)
 
@@ -112,7 +115,7 @@ YDL_OPTIONS = {
     "source_address": "0.0.0.0",
     "extract_flat": False,
 
-    **({"cookiefile": COOKIE_FILE} if os.path.exists(COOKIE_FILE) else {}),
+    **({"cookiefile": COOKIE_FILE} if USE_YOUTUBE_COOKIES and os.path.exists(COOKIE_FILE) else {}),
 
     "js_runtimes": {
         "node": {}
