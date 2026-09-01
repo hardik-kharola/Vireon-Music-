@@ -1297,61 +1297,73 @@ class MusicView(discord.ui.View):
         super().__init__(timeout=None)
         self.p = p
 
-        emoji_by_original_label = {
-            "⏵  Play": "play",
-            "|◀  Back": "back",
-            "Ⅱ  Pause": "pause",
-            "▶|  Skip": "skip",
-            "↻  Loop": "loop",
-            "−  Down": "volume_down",
-            "◀◀  Rewind": "rewind",
-            "♡  Favorite": "favorite",
-            "▶▶  Forward": "forward",
-            "+  Up": "volume_up",
-            "♩  Voice": "voice",
-            "⇄  Shuffle": "shuffle",
-            "×  Stop": "stop",
-            "×  Clear": "clear",
-            "≡  Playlist": "playlist",
-        }
+        # Attach the already-created Discord custom emojis by child order.
+        # This is deliberately independent of callback/label introspection.
+        # Discord's View preserves the declaration order of these 15 buttons.
+        emoji_keys = [
+            "play",
+            "back",
+            "pause",
+            "skip",
+            "loop",
+            "volume_down",
+            "rewind",
+            "favorite",
+            "forward",
+            "volume_up",
+            "voice",
+            "shuffle",
+            "stop",
+            "clear",
+            "playlist",
+        ]
 
-        compact_labels = {
-            "play": "Play",
-            "back": "Back",
-            "pause": "Pause",
-            "skip": "Skip",
-            "loop": "Loop",
-            "volume_down": "Down",
-            "rewind": "Rewind",
-            "favorite": "Favorite",
-            "forward": "Forward",
-            "volume_up": "Up",
-            "voice": "Voice",
-            "shuffle": "Shuffle",
-            "stop": "Stop",
-            "clear": "Clear",
-            "playlist": "Playlist",
-        }
+        compact_labels = [
+            "Play",
+            "Back",
+            "Pause",
+            "Skip",
+            "Loop",
+            "Down",
+            "Rewind",
+            "Favorite",
+            "Forward",
+            "Up",
+            "Voice",
+            "Shuffle",
+            "Stop",
+            "Clear",
+            "Playlist",
+        ]
 
         emoji_map = MUSIC_EMOJIS_BY_GUILD.get(
             self.p.guild_id,
             {}
         )
 
-        for child in self.children:
-            key = emoji_by_original_label.get(
-                getattr(child, "label", None)
-            )
+        for index, child in enumerate(self.children):
+            if index >= len(emoji_keys):
+                break
 
-            if not key:
-                continue
-
+            key = emoji_keys[index]
             emoji = emoji_map.get(key)
 
             if emoji is not None:
-                # Discord receives the actual custom emoji ID here.
-                child.emoji = emoji
-                child.label = compact_labels[key]
+                # Explicit Discord custom emoji ID.
+                child.emoji = discord.PartialEmoji(
+                    name=emoji.name,
+                    id=emoji.id,
+                    animated=emoji.animated
+                )
+                child.label = compact_labels[index]
+
+                logging.debug(
+                    "[EMOJIS] Button %d -> %s (%s)",
+                    index + 1,
+                    key,
+                    emoji.id
+                )
+
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not interaction.guild:
@@ -1741,6 +1753,10 @@ async def on_ready():
                 exc
             )
 
+        logging.info(
+            "[EMOJIS] Button emoji cache: %d/15",
+            len(MUSIC_EMOJIS_BY_GUILD[guild.id])
+        )
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.listening,
