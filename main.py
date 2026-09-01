@@ -89,93 +89,181 @@ bot = commands.Bot(
 
 
 # ============================================================
-# CUSTOM MUSIC EMOJIS
+# EXTERNAL MUSIC EMOJIS
 # ============================================================
 
-EMOJI_DIR = Path(__file__).resolve().parent / "emojis"
+# Optional: set this Railway variable to the source server's ID.
+# If left blank, the bot automatically finds the guild containing
+# the largest matching set of music emojis.
+EMOJI_SOURCE_GUILD_ID = os.getenv(
+    "EMOJI_SOURCE_GUILD_ID",
+    ""
+).strip()
 
-MUSIC_EMOJI_FILES = {
-    "play": "play.png",
-    "back": "back.png",
-    "pause": "pause.png",
-    "skip": "skip.png",
-    "loop": "loop.png",
-    "volume_down": "volume_down.png",
-    "rewind": "rewind.png",
-    "favorite": "favorite.png",
-    "forward": "forward.png",
-    "volume_up": "volume_up.png",
-    "voice": "voice.png",
-    "shuffle": "shuffle.png",
-    "stop": "stop.png",
-    "clear": "clear.png",
-    "playlist": "playlist.png",
+MUSIC_EMOJI_NAMES = {
+    "play": "play",
+    "back": "back",
+    "pause": "pause",
+    "skip": "skip",
+    "loop": "loop",
+    "volume_down": "volume_down",
+    "rewind": "rewind",
+    "favorite": "favorite",
+    "forward": "forward",
+    "volume_up": "volume_up",
+    "voice": "voice",
+    "shuffle": "shuffle",
+    "stop": "stop",
+    "clear": "clear",
+    "playlist": "playlist",
 }
 
-MUSIC_EMOJIS_BY_GUILD: dict[int, dict[str, discord.PartialEmoji]] = {}
+# Same external emoji set is used for every target guild.
+MUSIC_EMOJIS: dict[str, discord.PartialEmoji] = {}
+MUSIC_EMOJIS_READY = False
 
 
-async def ensure_music_emojis(guild: discord.Guild):
-    """Create/reuse the 15 player emojis. Never crash the bot if unavailable."""
-    result = {}
+def _find_emoji_source_guild() -> Optional[discord.Guild]:
+    """Find the configured or best matching source guild."""
+    if EMOJI_SOURCE_GUILD_ID.isdigit():
+        guild = bot.get_guild(int(EMOJI_SOURCE_GUILD_ID))
+        if guild:
+            return guild
+        logging.warning(
+            "[EMOJIS] EMOJI_SOURCE_GUILD_ID=%s is not a guild "
+            "the bot can access.",
+            EMOJI_SOURCE_GUILD_ID
+        )
 
-    for name, filename in MUSIC_EMOJI_FILES.items():
-        # Support both our generated names and manually named Discord emojis.
-        emoji = (
-            discord.utils.get(guild.emojis, name=f"vms_{name}")
-            or discord.utils.get(guild.emojis, name=name)
+    best_guild = None
+    best_count = 0
+
+    wanted = set(MUSIC_EMOJI_NAMES.values())
+
+    for guild in bot.guilds:
+        names = {emoji.name for emoji in guild.emojis}
+        count = len(wanted.intersection(names))
+        if count > best_count:
+            best_count = count
+            best_guild = guild
+
+    return best_guild
+
+
+async def setup_external_music_emojis():
+    """
+    Load the existing custom emojis from ONE source guild.
+
+    Nothing is created or uploaded. The bot simply references the
+    existing Discord emoji IDs for the music buttons.
+    """
+    global MUSIC_EMOJIS, MUSIC_EMOJIS_READY
+
+    MUSIC_EMOJIS = {}
+    MUSIC_EMOJIS_READY = False
+
+    source_guild = _find_emoji_source_guild()
+
+    if source_guild is None:
+        logging.warning(
+            "[EMOJIS] No source guild containing the music emoji set was found."
+        )
+        return
+
+    logging.info(
+        "[EMOJIS] External source server: %s (%s)",
+        source_guild.name,
+        source_guild.id
+    )
+
+    for key, emoji_name in MUSIC_EMOJI_NAMES.items():
+        emoji = discord.utils.get(
+            source_guild.emojis,
+            name=emoji_name
         )
 
         if emoji is None:
-            path = EMOJI_DIR / filename
+            logging.warning(
+                "[EMOJIS] Missing '%s' in source server.",
+                emoji_name
+            )
+            continue
 
-            if not path.exists():
-                logging.warning(
-                    "[EMOJIS] Missing PNG: %s",
-                    path
-                )
-                continue
-
-            try:
-                with path.open("rb") as fp:
-                    emoji = await guild.create_custom_emoji(
-                        name=f"vms_{name}",
-                        image=fp.read(),
-                        reason="Vireon Music player controls"
-                    )
-
-                logging.info(
-                    "[EMOJIS] Created %s -> %s",
-                    name,
-                    emoji.id
-                )
-
-            except discord.HTTPException as exc:
-                logging.warning(
-                    "[EMOJIS] Could not create %s in %s: %s",
-                    name,
-                    guild.name,
-                    exc
-                )
-                continue
-
-            except Exception as exc:
-                logging.warning(
-                    "[EMOJIS] %s failed in %s: %s",
-                    name,
-                    guild.name,
-                    exc
-                )
-                continue
-
-        result[name] = discord.PartialEmoji(
+        MUSIC_EMOJIS[key] = discord.PartialEmoji(
             name=emoji.name,
             id=emoji.id,
             animated=emoji.animated
         )
 
-    return result
+        logging.info(
+            "[EMOJIS] %s -> %s",
+            key,
+            emoji.id
+        )
 
+    MUSIC_EMOJIS_READY = bool(MUSIC_EMOJIS)
+
+    logging.info(
+        "[EMOJIS] External emoji cache ready: %d/15",
+        len(MUSIC_EMOJIS)
+    )
+
+
+def apply_external_music_emojis(view: "MusicView"):
+    """Attach the external custom emoji IDs to the existing 15 buttons."""
+    emoji_keys = [
+        "play",
+        "back",
+        "pause",
+        "skip",
+        "loop",
+        "volume_down",
+        "rewind",
+        "favorite",
+        "forward",
+        "volume_up",
+        "voice",
+        "shuffle",
+        "stop",
+        "clear",
+        "playlist",
+    ]
+
+    labels = [
+        "Play",
+        "Back",
+        "Pause",
+        "Skip",
+        "Loop",
+        "Down",
+        "Rewind",
+        "Favorite",
+        "Forward",
+        "Up",
+        "Voice",
+        "Shuffle",
+        "Stop",
+        "Clear",
+        "Playlist",
+    ]
+
+    for index, child in enumerate(view.children[:15]):
+        key = emoji_keys[index]
+
+        emoji = MUSIC_EMOJIS.get(key)
+        if emoji is None:
+            continue
+
+        child.emoji = discord.PartialEmoji(
+            name=emoji.name,
+            id=emoji.id,
+            animated=emoji.animated
+        )
+        child.label = labels[index]
+
+        underlying = getattr(child, "_underlying", None)
+        if underlying is not None:
+            underlying.emoji = child.emoji
 
 # ============================================================
 # YOUTUBE / FFMPEG
@@ -995,6 +1083,7 @@ async def update_player_message(
         embed = build_player_embed(p)
 
         view = MusicView(p)
+        apply_external_music_emojis(view)
 
         if p.player_message:
 
@@ -1099,60 +1188,217 @@ def resume_position(
 # AUTOPLAY
 # ============================================================
 
+def _autoplay_key(value: str) -> str:
+    """Normalize a title/URL for duplicate detection."""
+    value = (value or "").lower().strip()
+
+    for token in (
+        "official video",
+        "official audio",
+        "official music video",
+        "lyrics",
+        "lyric video",
+        "audio",
+        "video",
+    ):
+        value = value.replace(token, "")
+
+    return " ".join(value.split())
+
+
+def _same_track(a: Track, b: Track) -> bool:
+    """Return True when two tracks are effectively the same song."""
+    if not a or not b:
+        return False
+
+    if (
+        a.webpage_url
+        and b.webpage_url
+        and a.webpage_url.rstrip("/") == b.webpage_url.rstrip("/")
+    ):
+        return True
+
+    a_title = _autoplay_key(
+        f"{a.title} {a.author}"
+    )
+    b_title = _autoplay_key(
+        f"{b.title} {b.author}"
+    )
+
+    return bool(a_title and b_title and a_title == b_title)
+
+
+def _pick_autoplay_candidate(
+    info,
+    requester: discord.Member,
+    finished: Track,
+    recent_urls: set[str],
+):
+    """Pick a genuinely different result from a search result set."""
+    entries = []
+
+    if info and "entries" in info:
+        entries = [
+            entry
+            for entry in info.get("entries", [])
+            if entry
+        ]
+    elif info:
+        entries = [info]
+
+    for entry in entries:
+        candidate = _make_track(
+            entry,
+            requester,
+            entry.get("webpage_url") or entry.get("url") or "",
+            entry.get("extractor_key")
+            or entry.get("extractor")
+            or "Autoplay"
+        )
+
+        url = (candidate.webpage_url or "").rstrip("/")
+
+        if url in recent_urls:
+            continue
+
+        if _same_track(candidate, finished):
+            continue
+
+        return candidate
+
+    return None
+
+
 async def create_autoplay_track(
     p: GuildPlayer,
     finished: Track
 ):
+    """
+    Add a DIFFERENT song for autoplay.
 
-    if not p.autoplay:
+    We deliberately search multiple candidates instead of ytsearch1, then
+    reject the finished song/title and recent history. This prevents autoplay
+    from becoming an accidental repeat/loop.
+    """
+    if not p.autoplay or not finished:
         return
 
     try:
+        requester = finished.requester
 
-        search = (
-            f"{finished.title} "
-            f"similar songs"
-        )
+        recent_urls = {
+            (item.webpage_url or "").rstrip("/")
+            for item in (p.history[-10:] if p.history else [])
+            if item and item.webpage_url
+        }
 
-        track = await asyncio.to_thread(
-            resolve_track,
-            search,
-            finished.requester
-        )
+        queries = [
+            f"{finished.title} similar songs",
+            f"songs like {finished.title}",
+            f"{finished.author} similar songs",
+        ]
 
-        # Avoid immediately adding the exact same track.
-        if (
-            track.webpage_url
-            == finished.webpage_url
-        ):
-            search = (
-                f"{finished.title} "
-                f"official audio"
+        source_prefixes = [
+            ("YouTube", "ytsearch5"),
+            ("SoundCloud", "scsearch5"),
+            ("Bandcamp", "bcsearch5"),
+            ("Mixcloud", "mcsearch5"),
+        ]
+
+        selected = None
+
+        # Try multiple independent source/search combinations.
+        for query in queries:
+            if selected:
+                break
+
+            for source_name, prefix in source_prefixes:
+                try:
+                    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+                        info = await asyncio.to_thread(
+                            ydl.extract_info,
+                            f"{prefix}:{query}",
+                            False,
+                        )
+
+                    candidate = _pick_autoplay_candidate(
+                        info,
+                        requester,
+                        finished,
+                        recent_urls,
+                    )
+
+                    if candidate:
+                        candidate.source = source_name
+                        selected = candidate
+                        break
+
+                except Exception as exc:
+                    logging.warning(
+                        "[AUTOPLAY SOURCE FAILED] %s: %s",
+                        source_name,
+                        str(exc)[:220],
+                    )
+
+        # Last-resort broad search. Still reject the same song.
+        if selected is None:
+            fallback_query = (
+                f"{finished.author} {finished.title} "
+                "different song"
             )
 
-            track = await asyncio.to_thread(
-                resolve_track,
-                search,
-                finished.requester
-            )
+            for source_name, prefix in source_prefixes:
+                try:
+                    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+                        info = await asyncio.to_thread(
+                            ydl.extract_info,
+                            f"{prefix}:{fallback_query}",
+                            False,
+                        )
 
-        p.queue.append(track)
+                    candidate = _pick_autoplay_candidate(
+                        info,
+                        requester,
+                        finished,
+                        recent_urls,
+                    )
+
+                    if candidate:
+                        candidate.source = source_name
+                        selected = candidate
+                        break
+
+                except Exception as exc:
+                    logging.warning(
+                        "[AUTOPLAY FALLBACK FAILED] %s: %s",
+                        source_name,
+                        str(exc)[:220],
+                    )
+
+        if selected is None:
+            logging.warning(
+                "[AUTOPLAY] No different song found for '%s'; "
+                "nothing was queued.",
+                finished.title,
+            )
+            return
+
+        p.queue.append(selected)
 
         if p.text_channel:
-
             await p.text_channel.send(
                 embed=info_embed(
                     "Autoplay added "
-                    f"**{discord.utils.escape_markdown(track.title)}** "
+                    f"**{discord.utils.escape_markdown(selected.title)}** "
+                    f"from **{discord.utils.escape_markdown(selected.source)}** "
                     "to the queue."
                 )
             )
 
     except Exception as exc:
-
         logging.error(
             "Autoplay failed: %s",
-            exc
+            exc,
         )
 
 
@@ -1336,73 +1582,9 @@ class MusicView(discord.ui.View):
         super().__init__(timeout=None)
         self.p = p
 
-        # Discord custom emoji order for the existing 15 controls.
-        emoji_keys = [
-            "play", "back", "pause", "skip", "loop",
-            "volume_down", "rewind", "favorite", "forward", "volume_up",
-            "voice", "shuffle", "stop", "clear", "playlist",
-        ]
-
-        compact_labels = [
-            "Play", "Back", "Pause", "Skip", "Loop",
-            "Down", "Rewind", "Favorite", "Forward", "Up",
-            "Voice", "Shuffle", "Stop", "Clear", "Playlist",
-        ]
-
-        emoji_map = MUSIC_EMOJIS_BY_GUILD.get(self.p.guild_id, {})
-
-        if len(self.children) != 15:
-            logging.warning(
-                "[EMOJIS] Expected 15 music buttons, found %d.",
-                len(self.children)
-            )
-
-        # Apply emoji IDs directly to the underlying Button objects.
-        # This avoids relying on callback names, labels, or decorator wrappers.
-        for index, child in enumerate(self.children[:15]):
-            key = emoji_keys[index]
-            emoji = emoji_map.get(key)
-
-            if emoji is None:
-                logging.warning(
-                    "[EMOJIS] No Discord emoji loaded for button %s (%s).",
-                    index + 1,
-                    key
-                )
-                continue
-
-            partial = discord.PartialEmoji(
-                name=emoji.name,
-                id=emoji.id,
-                animated=False
-            )
-
-            try:
-                child.emoji = partial
-
-                # discord.py's Button exposes an underlying component.
-                # Keep both representations synchronized for serialization.
-                underlying = getattr(child, "_underlying", None)
-                if underlying is not None:
-                    underlying.emoji = partial
-
-                child.label = compact_labels[index]
-
-                logging.info(
-                    "[EMOJIS] Button %d/%d: %s -> %s",
-                    index + 1,
-                    15,
-                    key,
-                    str(partial)
-                )
-
-            except Exception as exc:
-                logging.warning(
-                    "[EMOJIS] Failed attaching %s to button %d: %s",
-                    key,
-                    index + 1,
-                    exc
-                )
+        # The 15 @discord.ui.button declarations below remain untouched.
+        # We only attach the externally hosted emoji references here.
+        apply_external_music_emojis(self)
 
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -1778,20 +1960,7 @@ async def on_ready():
             exc
         )
 
-    for guild in bot.guilds:
-        try:
-            MUSIC_EMOJIS_BY_GUILD[guild.id] = await ensure_music_emojis(guild)
-            logging.info(
-                "[EMOJIS] %d custom emojis ready in %s",
-                len(MUSIC_EMOJIS_BY_GUILD[guild.id]),
-                guild.name
-            )
-        except Exception as exc:
-            logging.warning(
-                "[EMOJIS] Setup skipped for %s: %s",
-                guild.name,
-                exc
-            )
+    await setup_external_music_emojis()
 
     await bot.change_presence(
         activity=discord.Activity(
