@@ -947,6 +947,42 @@ async def delete_player_message(p: GuildPlayer):
         pass
 
 
+def apply_music_emojis(view: "MusicView", guild_id: int):
+    """Reapply actual custom emoji IDs immediately before Discord serialization."""
+    emoji_keys = [
+        "play", "back", "pause", "skip", "loop",
+        "volume_down", "rewind", "favorite", "forward", "volume_up",
+        "voice", "shuffle", "stop", "clear", "playlist",
+    ]
+    labels = [
+        "Play", "Back", "Pause", "Skip", "Loop",
+        "Down", "Rewind", "Favorite", "Forward", "Up",
+        "Voice", "Shuffle", "Stop", "Clear", "Playlist",
+    ]
+
+    emoji_map = MUSIC_EMOJIS_BY_GUILD.get(guild_id, {})
+
+    for index, child in enumerate(view.children[:15]):
+        if index >= len(emoji_keys):
+            break
+
+        emoji = emoji_map.get(emoji_keys[index])
+        if emoji is None:
+            continue
+
+        partial = discord.PartialEmoji(
+            name=emoji.name,
+            id=emoji.id,
+            animated=False
+        )
+
+        child.emoji = partial
+        underlying = getattr(child, "_underlying", None)
+        if underlying is not None:
+            underlying.emoji = partial
+        child.label = labels[index]
+
+
 async def update_player_message(
     p: GuildPlayer
 ):
@@ -980,10 +1016,13 @@ async def update_player_message(
 
         try:
 
+            fresh_view = MusicView(p)
+            apply_music_emojis(fresh_view, p.guild_id)
+
             p.player_message = (
                 await p.text_channel.send(
                     embed=build_player_embed(p),
-                    view=MusicView(p)
+                    view=fresh_view
                 )
             )
 
@@ -1297,71 +1336,72 @@ class MusicView(discord.ui.View):
         super().__init__(timeout=None)
         self.p = p
 
-        # Attach the already-created Discord custom emojis by child order.
-        # This is deliberately independent of callback/label introspection.
-        # Discord's View preserves the declaration order of these 15 buttons.
+        # Discord custom emoji order for the existing 15 controls.
         emoji_keys = [
-            "play",
-            "back",
-            "pause",
-            "skip",
-            "loop",
-            "volume_down",
-            "rewind",
-            "favorite",
-            "forward",
-            "volume_up",
-            "voice",
-            "shuffle",
-            "stop",
-            "clear",
-            "playlist",
+            "play", "back", "pause", "skip", "loop",
+            "volume_down", "rewind", "favorite", "forward", "volume_up",
+            "voice", "shuffle", "stop", "clear", "playlist",
         ]
 
         compact_labels = [
-            "Play",
-            "Back",
-            "Pause",
-            "Skip",
-            "Loop",
-            "Down",
-            "Rewind",
-            "Favorite",
-            "Forward",
-            "Up",
-            "Voice",
-            "Shuffle",
-            "Stop",
-            "Clear",
-            "Playlist",
+            "Play", "Back", "Pause", "Skip", "Loop",
+            "Down", "Rewind", "Favorite", "Forward", "Up",
+            "Voice", "Shuffle", "Stop", "Clear", "Playlist",
         ]
 
-        emoji_map = MUSIC_EMOJIS_BY_GUILD.get(
-            self.p.guild_id,
-            {}
-        )
+        emoji_map = MUSIC_EMOJIS_BY_GUILD.get(self.p.guild_id, {})
 
-        for index, child in enumerate(self.children):
-            if index >= len(emoji_keys):
-                break
+        if len(self.children) != 15:
+            logging.warning(
+                "[EMOJIS] Expected 15 music buttons, found %d.",
+                len(self.children)
+            )
 
+        # Apply emoji IDs directly to the underlying Button objects.
+        # This avoids relying on callback names, labels, or decorator wrappers.
+        for index, child in enumerate(self.children[:15]):
             key = emoji_keys[index]
             emoji = emoji_map.get(key)
 
-            if emoji is not None:
-                # Explicit Discord custom emoji ID.
-                child.emoji = discord.PartialEmoji(
-                    name=emoji.name,
-                    id=emoji.id,
-                    animated=emoji.animated
+            if emoji is None:
+                logging.warning(
+                    "[EMOJIS] No Discord emoji loaded for button %s (%s).",
+                    index + 1,
+                    key
                 )
+                continue
+
+            partial = discord.PartialEmoji(
+                name=emoji.name,
+                id=emoji.id,
+                animated=False
+            )
+
+            try:
+                child.emoji = partial
+
+                # discord.py's Button exposes an underlying component.
+                # Keep both representations synchronized for serialization.
+                underlying = getattr(child, "_underlying", None)
+                if underlying is not None:
+                    underlying.emoji = partial
+
                 child.label = compact_labels[index]
 
-                logging.debug(
-                    "[EMOJIS] Button %d -> %s (%s)",
+                logging.info(
+                    "[EMOJIS] Button %d/%d: %s -> %s",
                     index + 1,
+                    15,
                     key,
-                    emoji.id
+                    str(partial)
+                )
+
+            except Exception as exc:
+                logging.warning(
+                    "[EMOJIS] Failed attaching %s to button %d: %s",
+                    key,
+                    index + 1,
+                    exc
                 )
 
 
@@ -1753,10 +1793,6 @@ async def on_ready():
                 exc
             )
 
-        logging.info(
-            "[EMOJIS] Button emoji cache: %d/15",
-            len(MUSIC_EMOJIS_BY_GUILD[guild.id])
-        )
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.listening,
@@ -2133,9 +2169,12 @@ async def slash_nowplaying(
             ephemeral=True
         )
 
+    view = MusicView(p)
+    apply_music_emojis(view, p.guild_id)
+
     await interaction.response.send_message(
         embed=build_player_embed(p),
-        view=MusicView(p)
+        view=view
     )
 
 
