@@ -18,12 +18,6 @@ from discord.ext import commands
 from dotenv import load_dotenv
 import yt_dlp
 
-# ============================================================
-# CUSTOM MUSIC EMOJIS
-# ============================================================
-# PNGs are expected in ./emojis/ with these exact filenames.
-EMOJI_DIR = Path(__file__).resolve().parent / "emojis" 
-
 
 # ============================================================
 # CONFIG
@@ -94,6 +88,12 @@ bot = commands.Bot(
 )
 
 
+# ============================================================
+# CUSTOM MUSIC EMOJIS
+# ============================================================
+
+EMOJI_DIR = Path(__file__).resolve().parent / "emojis"
+
 MUSIC_EMOJI_FILES = {
     "play": "play.png",
     "back": "back.png",
@@ -112,34 +112,24 @@ MUSIC_EMOJI_FILES = {
     "playlist": "playlist.png",
 }
 
-MUSIC_EMOJIS: dict[str, discord.Emoji] = {}
 
-async def setup_music_emojis_for_guild(guild: discord.Guild):
-    """Create/reuse the 15 local PNG emojis without ever crashing the bot."""
+async def ensure_music_emojis(guild: discord.Guild):
+    """Create or locate the custom emojis, without crashing the bot."""
     if not guild:
-        return
+        return {}
 
-    try:
-        me = guild.me or guild.get_member(bot.user.id if bot.user else 0)
-        if me and not me.guild_permissions.manage_emojis_and_stickers:
-            logging.warning(
-                "[EMOJIS] Missing Manage Emojis and Stickers in %s; "
-                "buttons will use text-only fallback.",
-                guild.name
-            )
-            return
+    result = {}
 
-        for name, filename in MUSIC_EMOJI_FILES.items():
-            key = f"{guild.id}:{name}"
+    for name, filename in MUSIC_EMOJI_FILES.items():
+        emoji = (
+            discord.utils.get(guild.emojis, name=f"vms_{name}")
+            or discord.utils.get(guild.emojis, name=name)
+        )
 
-            existing = discord.utils.get(guild.emojis, name=f"vms_{name}")
-            if existing:
-                MUSIC_EMOJIS[key] = existing
-                continue
-
+        if emoji is None:
             path = EMOJI_DIR / filename
             if not path.exists():
-                logging.warning("[EMOJIS] Missing file: %s", path)
+                logging.warning("[EMOJIS] Missing PNG: %s", path)
                 continue
 
             try:
@@ -147,30 +137,37 @@ async def setup_music_emojis_for_guild(guild: discord.Guild):
                     emoji = await guild.create_custom_emoji(
                         name=f"vms_{name}",
                         image=fp.read(),
-                        reason="Vireon Music player controls"
+                        reason="Vireon Music player controls",
                     )
-                MUSIC_EMOJIS[key] = emoji
-                logging.info("[EMOJIS] Created %s in %s", name, guild.name)
-            except discord.HTTPException as exc:
-                logging.warning(
-                    "[EMOJIS] Could not create %s in %s: %s",
-                    name, guild.name, exc
+                logging.info(
+                    "[EMOJIS] Created %s (%s) in %s",
+                    name,
+                    emoji.id,
+                    guild.name,
                 )
             except Exception as exc:
                 logging.warning(
-                    "[EMOJIS] %s failed in %s: %s",
-                    name, guild.name, exc
+                    "[EMOJIS] Could not create %s in %s: %s",
+                    name,
+                    guild.name,
+                    exc,
                 )
-    except Exception as exc:
-        logging.warning(
-            "[EMOJIS] Emoji setup skipped for %s: %s",
-            getattr(guild, "name", guild.id),
-            exc
+                continue
+
+        result[name] = discord.PartialEmoji(
+            name=emoji.name,
+            id=emoji.id,
+            animated=emoji.animated,
         )
 
-def music_emoji(name: str, guild_id: int):
-    """Return the uploaded custom emoji object, or None for safe fallback."""
-    return MUSIC_EMOJIS.get(f"{guild_id}:{name}")
+    return result
+
+
+MUSIC_EMOJIS_BY_GUILD: dict[int, dict[str, discord.PartialEmoji]] = {}
+
+
+def get_music_emoji(guild_id: int, name: str):
+    return MUSIC_EMOJIS_BY_GUILD.get(guild_id, {}).get(name)
 
 
 
@@ -1069,9 +1066,6 @@ class MusicView(discord.ui.View):
         super().__init__(timeout=None)
         self.p = p
 
-        # Apply local PNGs as Discord custom emojis after they have been
-        # registered for this guild. Text remains as a safe fallback.
-        guild_id = p.guild_id
         emoji_by_callback = {
             "play_pause": "play",
             "previous_btn": "back",
@@ -1090,35 +1084,40 @@ class MusicView(discord.ui.View):
             "queue_btn": "playlist",
         }
 
+        labels = {
+            "play": "Play",
+            "back": "Back",
+            "pause": "Pause",
+            "skip": "Skip",
+            "loop": "Loop",
+            "volume_down": "Down",
+            "rewind": "Rewind",
+            "favorite": "Favorite",
+            "forward": "Forward",
+            "volume_up": "Up",
+            "voice": "Voice",
+            "shuffle": "Shuffle",
+            "stop": "Stop",
+            "clear": "Clear",
+            "playlist": "Playlist",
+        }
+
+        emoji_map = MUSIC_EMOJIS_BY_GUILD.get(p.guild_id, {})
+
         for child in self.children:
             callback_name = getattr(
                 getattr(child, "callback", None),
                 "__name__",
-                ""
+                "",
             )
             key = emoji_by_callback.get(callback_name)
-            if key:
-                emoji = music_emoji(key, guild_id)
-                if emoji is not None:
-                    child.emoji = emoji
-                    # Compact text when the custom emoji is available.
-                    child.label = {
-                        "play": "Play",
-                        "back": "Back",
-                        "pause": "Pause",
-                        "skip": "Skip",
-                        "loop": "Loop",
-                        "volume_down": "Down",
-                        "rewind": "Rewind",
-                        "favorite": "Favorite",
-                        "forward": "Forward",
-                        "volume_up": "Up",
-                        "voice": "Voice",
-                        "shuffle": "Shuffle",
-                        "stop": "Stop",
-                        "clear": "Clear",
-                        "playlist": "Playlist",
-                    }[key]
+            if not key:
+                continue
+
+            emoji = emoji_map.get(key)
+            if emoji is not None:
+                child.emoji = emoji
+                child.label = labels[key]
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not interaction.guild:
@@ -1494,7 +1493,7 @@ async def on_ready():
         )
 
     for guild in bot.guilds:
-        await setup_music_emojis_for_guild(guild)
+        MUSIC_EMOJIS_BY_GUILD[guild.id] = await ensure_music_emojis(guild)
 
     await bot.change_presence(
         activity=discord.Activity(
