@@ -112,15 +112,15 @@ MUSIC_EMOJI_FILES = {
     "playlist": "playlist.png",
 }
 
+MUSIC_EMOJIS_BY_GUILD: dict[int, dict[str, discord.PartialEmoji]] = {}
+
 
 async def ensure_music_emojis(guild: discord.Guild):
-    """Create or locate the custom emojis, without crashing the bot."""
-    if not guild:
-        return {}
-
+    """Create/reuse the 15 player emojis. Never crash the bot if unavailable."""
     result = {}
 
     for name, filename in MUSIC_EMOJI_FILES.items():
+        # Support both our generated names and manually named Discord emojis.
         emoji = (
             discord.utils.get(guild.emojis, name=f"vms_{name}")
             or discord.utils.get(guild.emojis, name=name)
@@ -128,8 +128,12 @@ async def ensure_music_emojis(guild: discord.Guild):
 
         if emoji is None:
             path = EMOJI_DIR / filename
+
             if not path.exists():
-                logging.warning("[EMOJIS] Missing PNG: %s", path)
+                logging.warning(
+                    "[EMOJIS] Missing PNG: %s",
+                    path
+                )
                 continue
 
             try:
@@ -137,38 +141,40 @@ async def ensure_music_emojis(guild: discord.Guild):
                     emoji = await guild.create_custom_emoji(
                         name=f"vms_{name}",
                         image=fp.read(),
-                        reason="Vireon Music player controls",
+                        reason="Vireon Music player controls"
                     )
+
                 logging.info(
-                    "[EMOJIS] Created %s (%s) in %s",
+                    "[EMOJIS] Created %s -> %s",
                     name,
-                    emoji.id,
-                    guild.name,
+                    emoji.id
                 )
-            except Exception as exc:
+
+            except discord.HTTPException as exc:
                 logging.warning(
                     "[EMOJIS] Could not create %s in %s: %s",
                     name,
                     guild.name,
-                    exc,
+                    exc
+                )
+                continue
+
+            except Exception as exc:
+                logging.warning(
+                    "[EMOJIS] %s failed in %s: %s",
+                    name,
+                    guild.name,
+                    exc
                 )
                 continue
 
         result[name] = discord.PartialEmoji(
             name=emoji.name,
             id=emoji.id,
-            animated=emoji.animated,
+            animated=emoji.animated
         )
 
     return result
-
-
-MUSIC_EMOJIS_BY_GUILD: dict[int, dict[str, discord.PartialEmoji]] = {}
-
-
-def get_music_emoji(guild_id: int, name: str):
-    return MUSIC_EMOJIS_BY_GUILD.get(guild_id, {}).get(name)
-
 
 
 # ============================================================
@@ -514,96 +520,267 @@ def _make_track(info, requester: discord.Member, fallback_url: str, source: str)
     )
 
 
-def resolve_track(
-    query: str,
-    requester: discord.Member
-) -> Track:
-    """Resolve YouTube plus yt-dlp-supported sources into one Track object.
-
-    Supported directly by yt-dlp include YouTube, SoundCloud, Bandcamp,
-    Mixcloud, Vimeo, Dailymotion, direct media URLs, and other supported
-    extractors. Spotify is handled as metadata and resolved to a YouTube
-    audio result because Spotify does not expose a downloadable Discord
-    audio stream through its public API.
+def _youtube_oembed_metadata(url: str):
     """
-    query = query.strip()
+    Get public YouTube title/artist metadata without downloading the video.
+    Used only to find an alternative source when a YouTube URL is blocked.
+    """
+    endpoint = (
+        "https://www.youtube.com/oembed?url="
+        + quote(url, safe="")
+        + "&format=json"
+    )
+    request = Request(
+        endpoint,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
 
-    if not query:
-        raise ValueError("Please provide a song name or supported URL.")
+    with urlopen(request, timeout=6) as response:
+        data = json.loads(
+            response.read().decode("utf-8")
+        )
 
-    # Spotify: read public metadata, then resolve the matching audio on
-    # YouTube. We keep the Spotify URL as the user-facing source URL.
-    if _is_spotify_url(query):
-        try:
-            title, artist, spotify_thumbnail = _spotify_metadata(query)
-            search = f"{title} {artist}".strip()
+    return (
+        (data.get("title") or "").strip(),
+        (data.get("author_name") or "").strip(),
+        data.get("thumbnail_url")
+    )
 
-            with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-                info = ydl.extract_info(
-                    f"ytsearch1:{search}",
-                    download=False
-                )
 
-            track = _make_track(
-                info,
-                requester,
-                query,
-                "Spotify → YouTube"
-            )
-            if spotify_thumbnail:
-                track.thumbnail = spotify_thumbnail
-            return track
-        except Exception as exc:
-            raise ValueError(
-                f"Could not resolve Spotify track: {str(exc)[:500]}"
-            ) from exc
-
-    # URLs are passed directly to yt-dlp. This enables all installed
-    # yt-dlp extractors without changing the Discord playback layer.
-    is_url = query.lower().startswith((
-        "http://", "https://"
-    ))
-
+def _resolve_source_target(
+    target: str,
+    requester: discord.Member,
+    source_name: str
+) -> Track:
+    """Resolve one yt-dlp target and normalize it into Track."""
     with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-        if is_url:
-            info = ydl.extract_info(
-                query,
-                download=False
-            )
-        else:
-            info = ydl.extract_info(
-                f"ytsearch1:{query}",
-                download=False
-            )
+        info = ydl.extract_info(
+            target,
+            download=False
+        )
 
     track = _make_track(
         info,
         requester,
-        query,
-        "URL source" if is_url else "YouTube"
+        target,
+        source_name
     )
 
-    # Prefer the actual extractor name when yt-dlp provides one.
     raw_info = _extract_first(info)
+
     if raw_info:
         extractor = (
             raw_info.get("extractor_key")
             or raw_info.get("extractor")
         )
+
         if extractor:
             track.source = str(extractor)
 
     return track
 
 
-def refresh_stream(track: Track) -> Track:
+def _resolve_text_with_fallback(
+    query: str,
+    requester: discord.Member
+) -> Track:
+    """
+    Try multiple independent yt-dlp sources in order.
+    The first playable result wins.
+    """
+    source_targets = [
+        ("YouTube", f"ytsearch1:{query}"),
+        ("SoundCloud", f"scsearch1:{query}"),
+        ("Bandcamp", f"bcsearch1:{query}"),
+        ("Mixcloud", f"mcsearch1:{query}")
+    ]
 
-    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+    errors = []
 
-        info = ydl.extract_info(
-            track.webpage_url,
-            download=False
+    for source_name, target in source_targets:
+        try:
+            return _resolve_source_target(
+                target,
+                requester,
+                source_name
+            )
+
+        except Exception as exc:
+            errors.append(
+                f"{source_name}: {str(exc)[:220]}"
+            )
+            logging.warning(
+                "[SOURCE FAILED] %s -> %s",
+                source_name,
+                str(exc)[:250]
+            )
+
+    raise ValueError(
+        "All playback sources failed.\n"
+        + "\n".join(
+            f"• {error}"
+            for error in errors
         )
+    )
+
+
+def _resolve_url_with_fallback(
+    url: str,
+    requester: discord.Member
+) -> Track:
+    """
+    Try a direct URL first.
+
+    For YouTube URLs, if YouTube rejects the request, retrieve public
+    oEmbed metadata and search SoundCloud/Bandcamp/Mixcloud for a match.
+    Other direct URLs remain direct and are never silently replaced.
+    """
+    try:
+        return _resolve_source_target(
+            url,
+            requester,
+            "URL source"
+        )
+
+    except Exception as primary_exc:
+        is_youtube = (
+            "youtube.com/" in url.lower()
+            or "youtu.be/" in url.lower()
+        )
+
+        if not is_youtube:
+            raise primary_exc
+
+        query = ""
+
+        try:
+            title, artist, _ = _youtube_oembed_metadata(url)
+            query = f"{title} {artist}".strip()
+
+        except Exception as exc:
+            logging.warning(
+                "[YOUTUBE METADATA FAILED] %s",
+                exc
+            )
+
+        if not query:
+            raise ValueError(
+                "YouTube rejected this video and its public metadata "
+                "could not be read. "
+                f"Original error: {str(primary_exc)[:500]}"
+            ) from primary_exc
+
+        # Do NOT retry the same failing YouTube URL/search endlessly.
+        # Try the other sources directly with the resolved title/artist.
+        alternative_sources = [
+            ("SoundCloud", f"scsearch1:{query}"),
+            ("Bandcamp", f"bcsearch1:{query}"),
+            ("Mixcloud", f"mcsearch1:{query}")
+        ]
+
+        errors = []
+
+        for source_name, target in alternative_sources:
+            try:
+                return _resolve_source_target(
+                    target,
+                    requester,
+                    source_name
+                )
+
+            except Exception as exc:
+                errors.append(
+                    f"{source_name}: {str(exc)[:220]}"
+                )
+
+        raise ValueError(
+            "YouTube failed and no playable alternative was found.\n"
+            f"Title searched: **{query}**\n"
+            + "\n".join(
+                f"• {error}"
+                for error in errors
+            )
+        ) from primary_exc
+
+
+def resolve_track(
+    query: str,
+    requester: discord.Member
+) -> Track:
+    """
+    Resolve tracks with automatic multi-source fallback.
+
+    Text search:
+        YouTube -> SoundCloud -> Bandcamp -> Mixcloud
+
+    Spotify URL:
+        read public metadata -> same four audio sources
+
+    YouTube URL:
+        try exact URL -> if blocked, use public metadata ->
+        SoundCloud -> Bandcamp -> Mixcloud
+
+    Other direct URLs:
+        remain direct and are not replaced with unrelated content.
+    """
+    query = query.strip()
+
+    if not query:
+        raise ValueError(
+            "Please provide a song name or supported URL."
+        )
+
+    if _is_spotify_url(query):
+        try:
+            title, artist, spotify_thumbnail = _spotify_metadata(query)
+
+            track = _resolve_text_with_fallback(
+                f"{title} {artist}".strip(),
+                requester
+            )
+
+            if spotify_thumbnail:
+                track.thumbnail = spotify_thumbnail
+
+            track.source = (
+                f"Spotify → {track.source}"
+            )
+
+            return track
+
+        except Exception as exc:
+            raise ValueError(
+                f"Could not resolve Spotify track: {str(exc)[:700]}"
+            ) from exc
+
+    if query.lower().startswith((
+        "http://",
+        "https://"
+    )):
+        return _resolve_url_with_fallback(
+            query,
+            requester
+        )
+
+    return _resolve_text_with_fallback(
+        query,
+        requester
+    )
+
+
+def refresh_stream(track: Track) -> Track:
+    """
+    Refresh an already-resolved stream.
+
+    If the saved source is YouTube and the stream refresh is blocked,
+    search alternative sources using the track title/author.
+    """
+    try:
+        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+            info = ydl.extract_info(
+                track.webpage_url,
+                download=False
+            )
 
         if info and "entries" in info:
             info = next(
@@ -621,21 +798,75 @@ def refresh_stream(track: Track) -> Track:
             )
 
         track.stream_url = info.get("url")
-
         track.title = info.get(
             "title",
             track.title
         )
-
         track.duration = info.get(
             "duration"
         ) or track.duration
-
         track.thumbnail = info.get(
             "thumbnail"
         ) or track.thumbnail
 
         return track
+
+    except Exception as primary_exc:
+        source_name = (
+            track.source
+            or ""
+        ).lower()
+
+        is_youtube = (
+            "youtube" in source_name
+            or "youtube.com/" in track.webpage_url.lower()
+            or "youtu.be/" in track.webpage_url.lower()
+        )
+
+        if not is_youtube:
+            raise
+
+        query = (
+            f"{track.title} {track.author}"
+        ).strip()
+
+        try:
+            fallback = _resolve_text_with_fallback(
+                query,
+                track.requester
+            )
+
+            # Avoid replacing the track with the exact same blocked URL.
+            if fallback.webpage_url == track.webpage_url:
+                raise ValueError(
+                    "Fallback returned the same blocked source."
+                )
+
+            track.title = fallback.title
+            track.webpage_url = fallback.webpage_url
+            track.duration = fallback.duration
+            track.thumbnail = (
+                fallback.thumbnail
+                or track.thumbnail
+            )
+            track.stream_url = fallback.stream_url
+            track.author = fallback.author
+            track.source = fallback.source
+
+            logging.info(
+                "[PLAYBACK FALLBACK] %s",
+                track.source
+            )
+
+            return track
+
+        except Exception as fallback_exc:
+            raise ValueError(
+                "Playback source failed and no alternative source "
+                "could be started.\n"
+                f"Primary: {str(primary_exc)[:350]}\n"
+                f"Fallback: {str(fallback_exc)[:500]}"
+            ) from fallback_exc
 
 
 # ============================================================
@@ -1066,25 +1297,25 @@ class MusicView(discord.ui.View):
         super().__init__(timeout=None)
         self.p = p
 
-        emoji_by_callback = {
-            "play_pause": "play",
-            "previous_btn": "back",
-            "pause_btn": "pause",
-            "skip_btn": "skip",
-            "loop_btn": "loop",
-            "volume_down": "volume_down",
-            "rewind_btn": "rewind",
-            "favorite_btn": "favorite",
-            "forward_btn": "forward",
-            "volume_up": "volume_up",
-            "voice_btn": "voice",
-            "shuffle_btn": "shuffle",
-            "stop_btn": "stop",
-            "clear_btn": "clear",
-            "queue_btn": "playlist",
+        emoji_by_original_label = {
+            "⏵  Play": "play",
+            "|◀  Back": "back",
+            "Ⅱ  Pause": "pause",
+            "▶|  Skip": "skip",
+            "↻  Loop": "loop",
+            "−  Down": "volume_down",
+            "◀◀  Rewind": "rewind",
+            "♡  Favorite": "favorite",
+            "▶▶  Forward": "forward",
+            "+  Up": "volume_up",
+            "♩  Voice": "voice",
+            "⇄  Shuffle": "shuffle",
+            "×  Stop": "stop",
+            "×  Clear": "clear",
+            "≡  Playlist": "playlist",
         }
 
-        labels = {
+        compact_labels = {
             "play": "Play",
             "back": "Back",
             "pause": "Pause",
@@ -1102,22 +1333,25 @@ class MusicView(discord.ui.View):
             "playlist": "Playlist",
         }
 
-        emoji_map = MUSIC_EMOJIS_BY_GUILD.get(p.guild_id, {})
+        emoji_map = MUSIC_EMOJIS_BY_GUILD.get(
+            self.p.guild_id,
+            {}
+        )
 
         for child in self.children:
-            callback_name = getattr(
-                getattr(child, "callback", None),
-                "__name__",
-                "",
+            key = emoji_by_original_label.get(
+                getattr(child, "label", None)
             )
-            key = emoji_by_callback.get(callback_name)
+
             if not key:
                 continue
 
             emoji = emoji_map.get(key)
+
             if emoji is not None:
+                # Discord receives the actual custom emoji ID here.
                 child.emoji = emoji
-                child.label = labels[key]
+                child.label = compact_labels[key]
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not interaction.guild:
@@ -1493,7 +1727,19 @@ async def on_ready():
         )
 
     for guild in bot.guilds:
-        MUSIC_EMOJIS_BY_GUILD[guild.id] = await ensure_music_emojis(guild)
+        try:
+            MUSIC_EMOJIS_BY_GUILD[guild.id] = await ensure_music_emojis(guild)
+            logging.info(
+                "[EMOJIS] %d custom emojis ready in %s",
+                len(MUSIC_EMOJIS_BY_GUILD[guild.id]),
+                guild.name
+            )
+        except Exception as exc:
+            logging.warning(
+                "[EMOJIS] Setup skipped for %s: %s",
+                guild.name,
+                exc
+            )
 
     await bot.change_presence(
         activity=discord.Activity(
