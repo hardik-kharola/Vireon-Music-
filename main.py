@@ -5,7 +5,7 @@ import random
 import shutil
 import time
 import json
-from urllib.parse import quote, urlparse, parse_qs
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 from collections import deque
 from dataclasses import dataclass
@@ -292,6 +292,10 @@ YDL_OPTIONS = {
     "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
     "extract_flat": False,
+    "retries": 3,
+    "fragment_retries": 3,
+    "file_access_retries": 2,
+    "skip_unavailable_fragments": True,
 
     **({"cookiefile": COOKIE_FILE} if USE_YOUTUBE_COOKIES and os.path.exists(COOKIE_FILE) else {}),
 
@@ -678,7 +682,6 @@ def _resolve_text_with_fallback(
     """
     source_targets = [
         ("YouTube", f"ytsearch1:{query}"),
-        ("SoundCloud", f"scsearch1:{query}"),
         ("Bandcamp", f"bcsearch1:{query}"),
         ("Mixcloud", f"mcsearch1:{query}")
     ]
@@ -720,7 +723,7 @@ def _resolve_url_with_fallback(
     Try a direct URL first.
 
     For YouTube URLs, if YouTube rejects the request, retrieve public
-    oEmbed metadata and search SoundCloud/Bandcamp/Mixcloud for a match.
+    oEmbed metadata and search Bandcamp/Mixcloud for a match.
     Other direct URLs remain direct and are never silently replaced.
     """
     try:
@@ -761,7 +764,6 @@ def _resolve_url_with_fallback(
         # Do NOT retry the same failing YouTube URL/search endlessly.
         # Try the other sources directly with the resolved title/artist.
         alternative_sources = [
-            ("SoundCloud", f"scsearch1:{query}"),
             ("Bandcamp", f"bcsearch1:{query}"),
             ("Mixcloud", f"mcsearch1:{query}")
         ]
@@ -791,141 +793,25 @@ def _resolve_url_with_fallback(
         ) from primary_exc
 
 
-
-def _is_apple_music_url(url: str) -> bool:
-    url = (url or "").lower()
-    return "music.apple.com/" in url or "itunes.apple.com/" in url
-
-
-def _apple_music_metadata(url: str):
-    """
-    Resolve public Apple Music/iTunes metadata.
-
-    Apple Music's consumer catalog does not expose a generic full-length,
-    DRM-free stream URL through this endpoint. We therefore use the metadata
-    to locate the same track on a playable provider.
-    """
-    parsed = urlparse(url)
-    parts = [p for p in parsed.path.split("/") if p]
-
-    track_id = None
-
-    for part in parts:
-        if part.startswith("i="):
-            track_id = part[2:]
-            break
-        if part.isdigit():
-            track_id = part
-
-    if not track_id:
-        query = parse_qs(parsed.query)
-        values = query.get("i")
-        if values:
-            track_id = values[0]
-
-    if not track_id:
-        raise ValueError("Apple Music track ID could not be detected.")
-
-    request = Request(
-        "https://itunes.apple.com/lookup?id="
-        + quote(str(track_id), safe=""),
-        headers={"User-Agent": "Vireon-Music/1.0"}
-    )
-
-    with urlopen(request, timeout=8) as response:
-        data = json.loads(response.read().decode("utf-8"))
-
-    results = data.get("results") or []
-    song = next(
-        (
-            item
-            for item in results
-            if item.get("kind") == "song"
-        ),
-        None
-    )
-
-    if not song:
-        raise ValueError("Apple Music metadata could not be read.")
-
-    return (
-        (song.get("trackName") or "").strip(),
-        (song.get("artistName") or "").strip(),
-        song.get("artworkUrl100")
-    )
-
-
-def _resolve_three_sources(
-    title: str,
-    artist: str,
-    requester: discord.Member
-) -> Track:
-    """
-    Resolve a playable copy of the requested track.
-
-    Provider order:
-      1. YouTube
-      2. SoundCloud
-      3. Bandcamp
-
-    Spotify and Apple Music are supported as catalog/input sources:
-    their public APIs provide metadata, not a generic full-length audio
-    stream for this bot to hand to FFmpeg.
-    """
-    query = f"{title} {artist}".strip()
-
-    attempts = [
-        ("YouTube", f"ytsearch5:{query}"),
-        ("SoundCloud", f"scsearch5:{query}"),
-        ("Bandcamp", f"bcsearch5:{query}"),
-    ]
-
-    errors = []
-
-    for source_name, target in attempts:
-        try:
-            track = _resolve_source_target(
-                target,
-                requester,
-                source_name
-            )
-            track.source = source_name
-            return track
-        except Exception as exc:
-            errors.append(
-                f"{source_name}: {str(exc)[:220]}"
-            )
-            logging.warning(
-                "[SOURCE FAILED] %s -> %s",
-                source_name,
-                str(exc)[:250]
-            )
-
-    raise ValueError(
-        "No playable copy was found.\n"
-        + "\n".join(
-            f"• {error}"
-            for error in errors
-        )
-    )
-
 def resolve_track(
     query: str,
     requester: discord.Member
 ) -> Track:
     """
-    Supported catalog/input sources:
+    Resolve tracks with automatic multi-source fallback.
 
-    • YouTube URL/search
-    • Spotify track URL
-    • Apple Music/iTunes track URL
+    Text search:
+        YouTube -> Bandcamp -> Mixcloud
 
-    Spotify and Apple Music URLs are converted to public track metadata,
-    then a playable copy is found through the music-source fallback stack.
+    Spotify URL:
+        read public metadata -> same four audio sources
 
-    For a YouTube URL that fails authentication, its public metadata is used
-    to switch to another playable source instead of returning the YouTube
-    error immediately.
+    YouTube URL:
+        try exact URL -> if blocked, use public metadata ->
+        Bandcamp -> Mixcloud
+
+    Other direct URLs:
+        remain direct and are not replaced with unrelated content.
     """
     query = query.strip()
 
@@ -934,90 +820,40 @@ def resolve_track(
             "Please provide a song name or supported URL."
         )
 
-    # Spotify catalog source.
     if _is_spotify_url(query):
         try:
-            title, artist, thumbnail = _spotify_metadata(query)
+            title, artist, spotify_thumbnail = _spotify_metadata(query)
 
-            track = _resolve_three_sources(
-                title,
-                artist,
+            track = _resolve_text_with_fallback(
+                f"{title} {artist}".strip(),
                 requester
             )
 
-            if thumbnail:
-                track.thumbnail = thumbnail
+            if spotify_thumbnail:
+                track.thumbnail = spotify_thumbnail
 
-            track.source = f"Spotify → {track.source}"
+            track.source = (
+                f"Spotify → {track.source}"
+            )
+
             return track
 
         except Exception as exc:
             raise ValueError(
-                f"Spotify track could not be resolved: {str(exc)[:700]}"
+                f"Could not resolve Spotify track: {str(exc)[:700]}"
             ) from exc
 
-    # Apple Music catalog source.
-    if _is_apple_music_url(query):
-        try:
-            title, artist, thumbnail = _apple_music_metadata(query)
+    if query.lower().startswith((
+        "http://",
+        "https://"
+    )):
+        return _resolve_url_with_fallback(
+            query,
+            requester
+        )
 
-            track = _resolve_three_sources(
-                title,
-                artist,
-                requester
-            )
-
-            if thumbnail:
-                track.thumbnail = thumbnail
-
-            track.source = f"Apple Music → {track.source}"
-            return track
-
-        except Exception as exc:
-            raise ValueError(
-                f"Apple Music track could not be resolved: {str(exc)[:700]}"
-            ) from exc
-
-    # URL input, especially YouTube.
-    if query.lower().startswith(("http://", "https://")):
-        try:
-            return _resolve_source_target(
-                query,
-                requester,
-                "YouTube"
-            )
-
-        except Exception as primary_exc:
-            is_youtube = (
-                "youtube.com/" in query.lower()
-                or "youtu.be/" in query.lower()
-            )
-
-            if not is_youtube:
-                raise primary_exc
-
-            try:
-                title, artist, thumbnail = _youtube_oembed_metadata(query)
-            except Exception as meta_exc:
-                raise ValueError(
-                    "YouTube failed and its public metadata could not be read."
-                ) from meta_exc
-
-            track = _resolve_three_sources(
-                title,
-                artist,
-                requester
-            )
-
-            if thumbnail:
-                track.thumbnail = thumbnail
-
-            return track
-
-    # Plain search text.
-    return _resolve_three_sources(
+    return _resolve_text_with_fallback(
         query,
-        "",
         requester
     )
 
@@ -1115,11 +951,22 @@ def refresh_stream(track: Track) -> Track:
             return track
 
         except Exception as fallback_exc:
+            primary_text = str(primary_exc)
+            if "Sign in to confirm you're not a bot" in primary_text:
+                primary_hint = (
+                    "YouTube is requesting bot verification. "
+                    "Set USE_YOUTUBE_COOKIES=true and provide a current "
+                    "Netscape-format YOUTUBE_COOKIES value in Railway.\n"
+                )
+            else:
+                primary_hint = ""
+
             raise ValueError(
                 "Playback source failed and no alternative source "
                 "could be started.\n"
-                f"Primary: {str(primary_exc)[:350]}\n"
-                f"Fallback: {str(fallback_exc)[:500]}"
+                + primary_hint
+                + f"Primary: {primary_text[:350]}\n"
+                + f"Fallback: {str(fallback_exc)[:500]}"
             ) from fallback_exc
 
 
@@ -1466,7 +1313,6 @@ async def create_autoplay_track(
 
         source_prefixes = [
             ("YouTube", "ytsearch5"),
-            ("SoundCloud", "scsearch5"),
             ("Bandcamp", "bcsearch5"),
             ("Mixcloud", "mcsearch5"),
         ]
@@ -3355,7 +3201,7 @@ async def prefix_help(ctx):
         "`NO_PREFIX_USERS`\n\n"
 
         "**Sources**\n"
-        "YouTube • SoundCloud • Bandcamp • Mixcloud\n"
+        "YouTube • Bandcamp • Mixcloud\n"
         "Spotify links → metadata + matched audio\n"
         "Direct audio URLs are also supported.\n\n"
         "**Music Commands**\n"
